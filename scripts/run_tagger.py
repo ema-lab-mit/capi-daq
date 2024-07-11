@@ -256,10 +256,7 @@ if __name__ == "__main__":
         
     name = "tagger_monitor_data_" + identifier + "." + SAVING_FORMAT if os.path.isdir(save_path) else os.path.basename(save_path).split(".")[0] + "_" + identifier+ "." + SAVING_FORMAT
     save_path = os.path.join(folder_location, name)
-    
-    # Open the settings.json and update the saving name
     write_settings(save_path)
-    
     metadata_writer(folder_location, save_path)
     initialization_params["save_path"] = save_path
     print(f"Saving data to {save_path}")

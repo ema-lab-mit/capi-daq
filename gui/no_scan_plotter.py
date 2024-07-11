@@ -96,8 +96,8 @@ class TaggerVisualizer:
 
     def events_over_time(self, data):
         try:
-            # data['datetime'] = pd.to_datetime(data['synced_time'], errors='coerce')
-            data.iloc[:,"synced_time"] = data['synced_time'].apply(lambda x: pd.to_datetime(x, errors='coerce'))
+            data['datetime'] = pd.to_datetime(data['synced_time'], errors='coerce')
+            #data.iloc[:,"synced_time"] = data['synced_time'].apply(lambda x: pd.to_datetime(x, errors='coerce'))
             events_over_time = data.set_index('datetime').resample('1S').size()
             
             fig = px.line(x=events_over_time.index, y=events_over_time.values,
@@ -139,14 +139,14 @@ def validate_data(df):
 def main(predefine_data_path=None):
     st.set_page_config(page_title="Tagger Data Visualizer", layout="wide")
     st.title("Tagger Data Visualizer")
-    status = st.empty()
-    status_indicator = st.sidebar.empty()
+
     viz = TaggerVisualizer()
     if not predefine_data_path:
         predefine_data_path = load_settings()
+    status_indicator = st.sidebar.empty()
         
-    if os.path.exists(predefine_data_path):
-        status.warning("""No data available. Waiting for data...
+    if not os.path.exists(predefine_data_path):
+        st.warning("""No data available. Waiting for data...
                        Make sure you click the ignore on the debug pop-up to continue.
                        """)
         status_indicator.markdown("⚪ Status: No Data")
@@ -157,7 +157,7 @@ def main(predefine_data_path=None):
     data_path = st.sidebar.text_input("Data File Path", predefine_data_path)
 
     with st.sidebar.expander("Additional Settings"):
-        refresh_rate = st.slider("Refresh Rate (seconds)", 0.5, 10.0, 2.0, 0.5)
+        refresh_rate = st.slider("Refresh Rate (seconds)", 0.5, 10.0, 0.5, 0.5)
         rolling_window = st.slider("Rolling Window", 1, 100, 10)
     viz.rolling_window = rolling_window
 
@@ -183,55 +183,59 @@ def main(predefine_data_path=None):
     col3, col4 = st.columns(2)
     events_per_bunch_plot = col3.empty()
     channel_dist_plot = col4.empty()
-    
+    status = st.empty()
 
     while True:
-        df = load_data(data_path)
-        if 'clean_time' in st.session_state:
-            df = df[pd.to_datetime(df['synced_time']) >= st.session_state.clean_time]
+        try:
+            data_path = load_settings()
+            df = load_data(data_path)
 
-        notrigger_df = df[df['channels'] != -1]
-        if df.empty:
-            status.warning("No data available. Waiting for data...")
-            status_indicator.markdown("⚪ Status: No Data")
-        elif notrigger_df.empty:
-            status.warning("No events found. Only trigger events are present. Waiting for data...")
-            status_indicator.markdown("⚪ Status: No Ions Detected")
-        else:
-            status.success(f"Data loaded. Total events: {len(notrigger_df)}")
-            last_bunch_time = pd.to_datetime(df['synced_time'].max())
-            total_bunches = df['bunch'].max()
-            time_since_last_bunch = datetime.now() - last_bunch_time
-            
-            info_box.markdown(f"""
-            ### Data Summary
-            **Total Bunches:** {total_bunches}
-            
-            **Last Bunch Received:**
-            {last_bunch_time.strftime('%Y-%m-%d %H:%M:%S')}
-            
-            **Time Since Last Bunch:**
-            {time_since_last_bunch.total_seconds():.2f} seconds
-            """)
-            
-            if time_since_last_bunch.total_seconds() > 1.5:
-                status_indicator.markdown("🔴 Status: Offline")
+            if 'clean_time' in st.session_state:
+                df = df[pd.to_datetime(df['synced_time']) >= st.session_state.clean_time]
+            notrigger_df = df[df['channels'] != -1]
+            if df.empty:
+                status.warning("No data available. Waiting for data...")
+                status_indicator.markdown("⚪ Status: No Data")
+            elif notrigger_df.empty:
+                status.warning("No events found. Only trigger events are present. Waiting for data...")
+                status_indicator.markdown("⚪ Status: No Ions Detected")
             else:
-                status_indicator.markdown("🟢 Status: Ions Online")
-            
-            if use_time_range:
-                df['time'] = pd.to_datetime(df['synced_time'], errors='coerce').dt.time
-                df_filtered = df[(df['time'] >= start_time) & (df['time'] <= end_time)]
-                notrigger_filtered = df_filtered[df_filtered['channels'] != -1]
-            else:
-                df_filtered = df
-                notrigger_filtered = notrigger_df
+                last_bunch_time = pd.to_datetime(df['synced_time'].max())
+                total_bunches = df['bunch'].max()
+                time_since_last_bunch = datetime.now() - last_bunch_time
+                
+                info_box.markdown(f"""
+                ### Data Summary
+                **Total Bunches:** {total_bunches}
+                
+                **Last Bunch Received:**
+                {last_bunch_time.strftime('%Y-%m-%d %H:%M:%S')}
+                
+                **Time Since Last Bunch:**
+                {time_since_last_bunch.total_seconds():.2f} seconds
+                """)
+                
+                if time_since_last_bunch.total_seconds() > 1.5:
+                    status_indicator.markdown("🔴 Status: Offline")
+                else:
+                    status_indicator.markdown("🟢 Status: Ions Online")
+                
+                if use_time_range:
+                    df['time'] = pd.to_datetime(df['synced_time'], errors='coerce').dt.time
+                    df_filtered = df[(df['time'] >= start_time) & (df['time'] <= end_time)]
+                    notrigger_filtered = df_filtered[df_filtered['channels'] != -1]
+                else:
+                    df_filtered = df
+                    notrigger_filtered = notrigger_df
 
-            events_over_time_plot.plotly_chart(viz.events_over_time(notrigger_filtered), use_container_width=True)
-            tof_plot.plotly_chart(viz.tof_histogram(notrigger_filtered), use_container_width=True)
-            events_per_bunch_plot.plotly_chart(viz.events_per_bunch(notrigger_filtered), use_container_width=True)
-            channel_dist_plot.plotly_chart(viz.channel_distribution(df), use_container_width=True)
-
+                events_over_time_plot.plotly_chart(viz.events_over_time(notrigger_filtered), use_container_width=True)
+                tof_plot.plotly_chart(viz.tof_histogram(notrigger_filtered), use_container_width=True)
+                events_per_bunch_plot.plotly_chart(viz.events_per_bunch(notrigger_filtered), use_container_width=True)
+                channel_dist_plot.plotly_chart(viz.channel_distribution(df), use_container_width=True)
+                status.success(f"Data loaded. Total events: {len(notrigger_df)}")
+                
+        except Exception as e:
+            print("Error")
         time.sleep(refresh_rate)
 
 if __name__ == "__main__":

@@ -8,6 +8,8 @@ from PyQt5.QtCore import Qt, QTimer
 from threading import Thread
 import subprocess
 import psutil
+SETTINGS_PATH = "C:\\Users\\EMALAB\\Desktop\\TW_DAQ\\fast_tagger_gui\\settings.json"
+
 
 class CustomButton(QPushButton):
     def __init__(self, text, parent=None):
@@ -63,7 +65,6 @@ class CustomButton(QPushButton):
             """)
 
 class SimpleGUI(QWidget):
-    SETTINGS_PATH = "C:\\Users\\EMALAB\\Desktop\\TW_DAQ\\fast_tagger_gui\\settings.json"
 
     def __init__(self, plotting_script, tagger_script, scan_script, scanning_plotter):
         super().__init__()
@@ -142,10 +143,10 @@ class SimpleGUI(QWidget):
 
     def launch_tagger_monitor(self):
         self.status_label.setText('Launching Tagger Monitor...')
-        thread_streamlit = Thread(target=self.launch_streamlit_thread)
         thread_tagger = Thread(target=self.launch_tagger_thread)
-        thread_streamlit.start()
+        thread_streamlit = Thread(target=self.launch_streamlit_thread)
         thread_tagger.start()
+        thread_streamlit.start()
 
     def launch_streamlit_thread(self):
         command = f"streamlit run {self.plotting_script}"
@@ -190,7 +191,7 @@ class SimpleGUI(QWidget):
     def save_data(self):
         options = QFileDialog.Options()
         options |= QFileDialog.DontUseNativeDialog
-        self.save_path, _ = QFileDialog.getSaveFileName(self, "Save Data", "", "CSV Files (*.csv)", options=options)
+        self.save_path, _ = QFileDialog.getSaveFileName(self, "Configure Saving Path", "", "CSV Files (*.csv)", options=options)
         if self.save_path:
             self.write_settings(self.save_path)
             self.status_label.setText(f'Data Saved: {self.save_path}')
@@ -199,7 +200,7 @@ class SimpleGUI(QWidget):
 
     def write_settings(self, path):
         settings = {"save_path": path}
-        with open(self.SETTINGS_PATH, 'w') as f:
+        with open(SETTINGS_PATH, 'w') as f:
             json.dump(settings, f)
 
     def closeEvent(self, event):
