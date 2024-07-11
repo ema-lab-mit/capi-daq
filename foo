@@ -1,0 +1,26 @@
+File "C:\Users\EMALAB\.conda\envs\envNTT\Lib\site-packages\streamlit\runtime\scriptrunner\script_runner.py", line 589, in _run_script
+    exec(code, module.__dict__)
+File "C:\Users\EMALAB\Desktop\TW_DAQ\fast_tagger_gui\gui\no_scan_plotter.py", line 153, in <module>
+    main()
+File "C:\Users\EMALAB\Desktop\TW_DAQ\fast_tagger_gui\gui\no_scan_plotter.py", line 122, in main
+    df = load_data(data_path)
+         ^^^^^^^^^^^^^^^^^^^^
+File "C:\Users\EMALAB\Desktop\TW_DAQ\fast_tagger_gui\gui\no_scan_plotter.py", line 84, in load_data
+    return pd.read_csv(file_path)
+           ^^^^^^^^^^^^^^^^^^^^^^
+File "C:\Users\EMALAB\AppData\Roaming\Python\Python311\site-packages\pandas\io\parsers\readers.py", line 912, in read_csv
+    return _read(filepath_or_buffer, kwds)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "C:\Users\EMALAB\AppData\Roaming\Python\Python311\site-packages\pandas\io\parsers\readers.py", line 577, in _read
+    parser = TextFileReader(filepath_or_buffer, **kwds)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "C:\Users\EMALAB\AppData\Roaming\Python\Python311\site-packages\pandas\io\parsers\readers.py", line 1407, in __init__
+    self._engine = self._make_engine(f, self.engine)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "C:\Users\EMALAB\AppData\Roaming\Python\Python311\site-packages\pandas\io\parsers\readers.py", line 1679, in _make_engine
+    return mapping[engine](f, **self.options)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "C:\Users\EMALAB\AppData\Roaming\Python\Python311\site-packages\pandas\io\parsers\c_parser_wrapper.py", line 93, in __init__
+    self._reader = parsers.TextReader(src, **kwds)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "pandas\_libs\parsers.pyx", line 557, in pandas._libs.parsers.TextReader.__cinit__
