@@ -21,14 +21,8 @@ import json
 from PyQt5.QtWidgets import QApplication
 from fast_tagger_gui.gui.launching_gui import SimpleGUI
 
-def write_settings(saving_path):
-    settings_path = "C:\\Users\\EMALAB\\Desktop\\TW_DAQ\\fast_tagger_gui\\settings.json"
-    settings = {"save_path": saving_path}
-    with open(settings_path, 'w') as f:
-        json.dump(settings, f)
-
-def build_script_command(script_path, save_path, refresh_rate=0.5, is_scanning=False):
-    command = f"\"{script_path}\" --save_path \"{save_path}\" --refresh_rate {refresh_rate} --is_scanning {is_scanning}"
+def build_script_command(script_path, refresh_rate=0.5, is_scanning=False):
+    command = f"\"{script_path}\" --refresh_rate {refresh_rate} --is_scanning {is_scanning}"
     return command
 
 if __name__ == "__main__":
@@ -43,17 +37,10 @@ if __name__ == "__main__":
     default_save_path = "C:\\Users\\EMALAB\\Music\\TDC.csv"
     
     plotting_script = PATH_TAGGER_PLOTTER
-    tagger_script = build_script_command(PATH_TAGGER_SCRIPT, default_save_path)
-    scan_script = build_script_command(PATH_SCAN_SCRIPT, default_save_path, is_scanning=True)
+    tagger_script = build_script_command(PATH_TAGGER_SCRIPT)
+    scan_script = build_script_command(PATH_SCAN_SCRIPT, is_scanning=True)
     scanning_plotter = PATH_SCANNING_PLOTTER
 
     gui = SimpleGUI(plotting_script, tagger_script, scan_script, scanning_plotter)
     gui.show()
-
-    if gui.save_path:
-        save_path = gui.save_path
-        write_settings(save_path)
-    else:
-        write_settings(default_save_path)
-
     sys.exit(app.exec_())

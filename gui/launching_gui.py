@@ -1,15 +1,14 @@
 import sys
 import os
 import json
-from PyQt5.QtWidgets import (QApplication, QWidget, QPushButton, QVBoxLayout, QHBoxLayout, 
-                             QFileDialog, QLabel, QFrame, QSizePolicy)
+from PyQt5.QtWidgets import (QApplication, QWidget, QPushButton, QVBoxLayout, QHBoxLayout, QFileDialog, QLabel, QFrame, QSizePolicy, QMessageBox, QDialog, QFormLayout, QLineEdit, QDialogButtonBox)
 from PyQt5.QtGui import QFont, QIcon
 from PyQt5.QtCore import Qt, QTimer
 from threading import Thread
 import subprocess
 import psutil
-SETTINGS_PATH = "C:\\Users\\EMALAB\\Desktop\\TW_DAQ\\fast_tagger_gui\\settings.json"
 
+SETTINGS_PATH = "C:\\Users\\EMALAB\\Desktop\\TW_DAQ\\fast_tagger_gui\\settings.json"
 
 class CustomButton(QPushButton):
     def __init__(self, text, parent=None):
@@ -19,16 +18,16 @@ class CustomButton(QPushButton):
         self.setFont(QFont('Arial', 12))
         self.setStyleSheet("""
             QPushButton {
-                background-color: #4CAF50;
+                background-color: #3498db;
                 color: white;
                 border: none;
                 border-radius: 5px;
             }
             QPushButton:hover {
-                background-color: #45a049;
+                background-color: #2980b9;
             }
             QPushButton:pressed {
-                background-color: #3e8e41;
+                background-color: #1f639e;
             }
         """)
 
@@ -36,33 +35,109 @@ class CustomButton(QPushButton):
         if running:
             self.setStyleSheet("""
                 QPushButton {
-                    background-color: #FF0000;
+                    background-color: #e74c3c;
                     color: white;
                     border: none;
                     border-radius: 5px;
                 }
                 QPushButton:hover {
-                    background-color: #CC0000;
+                    background-color: #c0392b;
                 }
                 QPushButton:pressed {
-                    background-color: #990000;
+                    background-color: #a93226;
                 }
             """)
         else:
             self.setStyleSheet("""
                 QPushButton {
-                    background-color: #4CAF50;
+                    background-color: #3498db;
                     color: white;
                     border: none;
                     border-radius: 5px;
                 }
                 QPushButton:hover {
-                    background-color: #45a049;
+                    background-color: #2980b9;
                 }
                 QPushButton:pressed {
-                    background-color: #3e8e41;
+                    background-color: #1f639e;
                 }
             """)
+
+from PyQt5.QtWidgets import (QDialog, QFormLayout, QLineEdit, QDialogButtonBox, 
+                             QComboBox, QVBoxLayout, QGroupBox, QLabel)
+
+class ParameterDialog(QDialog):
+    def __init__(self, settings_path, parent=None):
+        super().__init__(parent)
+        self.settings_path = settings_path
+        self.initUI()
+
+    def initUI(self):
+        self.setWindowTitle('Edit Parameters')
+        self.setGeometry(100, 100, 400, 300)
+
+        main_layout = QVBoxLayout(self)
+
+        # Group for PV Name
+        pv_group = QGroupBox("PV Name")
+        pv_layout = QFormLayout()
+        self.pv_combo = QComboBox()
+        self.pv_combo.addItems(['wavenumber_1', 'wavenumber_2', 'wavenumber_3', 'wavenumber_4'])
+        pv_layout.addRow("PV Name:", self.pv_combo)
+        pv_group.setLayout(pv_layout)
+        main_layout.addWidget(pv_group)
+
+        # Group for Data Format
+        format_group = QGroupBox("Data Format")
+        format_layout = QFormLayout()
+        self.format_combo = QComboBox()
+        self.format_combo.addItems(['parquet', 'csv'])
+        format_layout.addRow("Data Format:", self.format_combo)
+        format_group.setLayout(format_layout)
+        main_layout.addWidget(format_group)
+
+        # Group for Other Parameters
+        other_group = QGroupBox("Other Parameters")
+        other_layout = QFormLayout()
+        self.parameters = self.load_parameters()
+        self.line_edits = {}
+        
+        for key, value in self.parameters.items():
+            if key not in ['pv_name', 'data_format']:
+                line_edit = QLineEdit(str(value))
+                other_layout.addRow(key, line_edit)
+                self.line_edits[key] = line_edit
+        
+        other_group.setLayout(other_layout)
+        main_layout.addWidget(other_group)
+
+        # Buttons
+        self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.button_box.accepted.connect(self.save_parameters)
+        self.button_box.rejected.connect(self.reject)
+        main_layout.addWidget(self.button_box)
+
+        # Set initial values
+        self.pv_combo.setCurrentText(self.parameters.get('pv_name', 'wavenumber_1'))
+        self.format_combo.setCurrentText(self.parameters.get('data_format', 'parquet'))
+
+    def load_parameters(self):
+        if os.path.exists(self.settings_path):
+            with open(self.settings_path, 'r') as f:
+                return json.load(f)
+        return {}
+
+    def save_parameters(self):
+        self.parameters['pv_name'] = self.pv_combo.currentText()
+        self.parameters['data_format'] = self.format_combo.currentText()
+        
+        for key, line_edit in self.line_edits.items():
+            self.parameters[key] = line_edit.text()
+
+        with open(self.settings_path, 'w') as f:
+            json.dump(self.parameters, f, indent=4)
+
+        self.accept()
 
 class SimpleGUI(QWidget):
 
@@ -101,16 +176,54 @@ class SimpleGUI(QWidget):
 
         # Buttons
         self.plot_button = CustomButton('Launch Tagger Monitor')
-        self.plot_button.clicked.connect(self.toggle_tagger_monitor)
+        self.plot_button.clicked.connect(self.verify_tagger_monitor)
         main_layout.addWidget(self.plot_button)
 
         self.run_scripts_button = CustomButton('Run Scan')
-        self.run_scripts_button.clicked.connect(self.toggle_scan)
+        self.run_scripts_button.clicked.connect(self.verify_scan)
         main_layout.addWidget(self.run_scripts_button)
 
+        # Create a horizontal layout for the set saving directory and set parameters buttons
+        button_layout = QHBoxLayout()
+
         self.save_data_button = CustomButton('Set Saving Directory')
+        self.save_data_button.setIcon(QIcon.fromTheme("folder"))
+        self.save_data_button.setStyleSheet("""
+            QPushButton {
+                background-color: #2ecc71;
+                color: white;
+                border: none;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #27ae60;
+            }
+            QPushButton:pressed {
+                background-color: #1e8449;
+            }
+        """)
         self.save_data_button.clicked.connect(self.save_data)
-        main_layout.addWidget(self.save_data_button)
+        button_layout.addWidget(self.save_data_button)
+
+        self.set_parameters_button = CustomButton('Set Parameters')
+        self.set_parameters_button.setStyleSheet("""
+            QPushButton {
+                background-color: #2ecc71;
+                color: white;
+                border: none;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #27ae60;
+            }
+            QPushButton:pressed {
+                background-color: #1e8449;
+            }
+        """)
+        self.set_parameters_button.clicked.connect(self.set_parameters)
+        button_layout.addWidget(self.set_parameters_button)
+
+        main_layout.addLayout(button_layout)
 
         # Status
         self.status_label = QLabel('Ready')
@@ -123,7 +236,10 @@ class SimpleGUI(QWidget):
         self.setGeometry(300, 300, 500, 450)
         self.setStyleSheet("""
             QWidget {
-                background-color: #f0f0f0;
+                background-color: #ecf0f1;
+            }
+            QLabel {
+                color: #2c3e50;
             }
         """)
 
@@ -131,6 +247,20 @@ class SimpleGUI(QWidget):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_process_status)
         self.timer.start(1000)  # Update every second
+
+    def verify_tagger_monitor(self):
+        if not self.save_path:
+            QMessageBox.warning(self, "Warning", "Please set the saving directory before launching the Tagger Monitor.")
+            self.save_data()
+        else:
+            self.toggle_tagger_monitor()
+
+    def verify_scan(self):
+        if not self.save_path:
+            QMessageBox.warning(self, "Warning", "Please set the saving directory before running the scan.")
+            self.save_data()
+        else:
+            self.toggle_scan()
 
     def toggle_tagger_monitor(self):
         if 'streamlit' in self.processes and 'tagger' in self.processes:
@@ -183,7 +313,7 @@ class SimpleGUI(QWidget):
         self.run_scripts_button.set_running(True)
 
     def run_scanning_plotter_thread(self):
-        command = f"python {self.scanning_plotter}"
+        command = f"streamlit run {self.scanning_plotter}"
         process = subprocess.Popen(command, shell=True)
         self.processes['scanning_plotter'] = psutil.Process(process.pid)
         self.status_label.setText('Scan Running')
@@ -191,17 +321,26 @@ class SimpleGUI(QWidget):
     def save_data(self):
         options = QFileDialog.Options()
         options |= QFileDialog.DontUseNativeDialog
-        self.save_path, _ = QFileDialog.getSaveFileName(self, "Configure Saving Path", "", "CSV Files (*.csv)", options=options)
+        self.save_path = QFileDialog.getExistingDirectory(self, "Select Saving Directory", options=options)
         if self.save_path:
-            self.write_settings(self.save_path)
-            self.status_label.setText(f'Data Saved: {self.save_path}')
+            self.update_settings(self.save_path)
+            self.status_label.setText(f'Saving Directory: {self.save_path}')
         else:
             self.status_label.setText('Save Cancelled')
 
-    def write_settings(self, path):
-        settings = {"save_path": path}
+    def update_settings(self, path):
+        path = path.replace('/', '\\')#.replace('\\', '/
+        settings = {}
+        if os.path.exists(SETTINGS_PATH):
+            with open(SETTINGS_PATH, 'r') as f:
+                settings = json.load(f)
+        settings["saving_folder"] = path
         with open(SETTINGS_PATH, 'w') as f:
             json.dump(settings, f)
+
+    def set_parameters(self):
+        dialog = ParameterDialog(SETTINGS_PATH, self)
+        dialog.exec_()
 
     def closeEvent(self, event):
         # Prevent the widget from closing immediately
@@ -231,7 +370,6 @@ class SimpleGUI(QWidget):
                 self.status_label.setText(f'{process_name.capitalize()} process terminated')
             except psutil.NoSuchProcess:
                 self.status_label.setText(f'{process_name.capitalize()} process not found')
-
 
     def update_process_status(self):
         for process_name, process in list(self.processes.items()):

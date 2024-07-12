@@ -10,8 +10,6 @@ import ntplib
 import threading
 from datetime import datetime, timedelta
 import traceback
-from pylablib.devices import M2
-from epics import PV
 import json
 
 this_path = os.path.abspath(__file__)
@@ -21,26 +19,48 @@ from TimeTaggerDriver_isolde.timetagger4 import TimeTagger as tg
 from beamline_tagg_gui.utils.physics_tools import time_to_flops, flops_to_time
 
 N_CHANNELS = ["A", "B", "C", "D"]
-STOP_TIME_WINDOW = 20e-6 # 200us
-INIT_TIME = 1e-6
-MAX_DF_LENGTH_IN_MEMORY_IF_SCANNING = 100_000
-SAVING_FORMAT = "csv"
+SETTINGS_PATH = "C:\\Users\\EMALAB\\Desktop\\TW_DAQ\\fast_tagger_gui\\settings.json"
+MAX_DF_LENGTH_IN_MEMORY_IF_SCANNING = 1_000_000
+
+# Read the configuration file for the initialization parameters
+
+def get_card_settings():
+    try:
+        with open(SETTINGS_PATH, 'r') as f:
+            settings = json.load(f)
+        return {
+            "tof_start": float(settings.get("tof_start", "1e-6")),
+            "tof_end": float(settings.get("tof_end", "20e-6")),
+            "channel_level": float(settings.get("channel_level", "-0.5")),
+            "trigger_level": float(settings.get("trigger_level", "-0.5")),
+            "pv_name": settings.get("pv_name", "LaserLab:wavenumber_1"),
+            "data_format": settings.get("data_format", "parquet"),
+        }
+    except Exception as e:
+        print(f"Error loading settings: {e}")
+        return {}
+
+modified_settings = get_card_settings()
+STOP_TIME_WINDOW = modified_settings.get("tof_end", 20e-6)
+INIT_TIME = modified_settings.get("tof_start", 1e-6)
+SAVING_FORMAT = modified_settings.get("data_format", "parquet")
+LASER_PVNAME = modified_settings.get("pv_name", "LaserLab:wavenumber_1")
+CHANNEL_LEVEL = modified_settings.get("channel_level", -0.5)
 
 initialization_params = {
     "trigger": {
         "channels": [True, True, True, True],
-        "levels": [-0.5 for _ in range(4)],
+        "levels": [CHANNEL_LEVEL for _ in range(4)],
         "types": [False for _ in range(4)],
         "starts": [int(time_to_flops(INIT_TIME)) for _ in range(4)],
         "stops": [int(time_to_flops(STOP_TIME_WINDOW)) for _ in range(4)],
     },
-    "refresh_rate": 0.5,
+    "refresh_rate": 0.2,
 }
 ntp_time_offset = 0.0
 last_sync_time = None
-time_sync_interval = 30  # Sync every .5 minutes
+time_sync_interval = 120  # Sync every 2 minutes
 ntp_sync_queue = queue.Queue()
-
 def sync_time():
     global ntp_time_offset, last_sync_time
     c = ntplib.NTPClient()
@@ -176,16 +196,14 @@ def get_wnum():
 def time_converter(value):
     return datetime.timedelta(milliseconds=value)
 
-def main_loop(tagger, saving_path=None, is_scanning=False):
-    df = pd.DataFrame(columns=["bunch", "n_events", "channels", "timestamp", "synced_time", "wavenumber"])
+def main_loop(tagger, saving_path=None, is_scanning=False, pv_name = LASER_PVNAME):
+    df = pd.DataFrame(columns=["bunch", "n_events", "channels", "timestamp", "synced_time", f"wavenumber_{pv_name}"])
     tagger.set_trigger_falling()
     tagger.set_trigger_level(-0.5)
     tagger.start_reading()
     numbers_of_trigs = []
     sync_thread = threading.Thread(target=time_sync_thread, daemon=True)
     sync_thread.start()
-
-    laser = M2.Solstis("192.168.1.222", 39933)
     global wavenumber
     wavenumber = PV("LaserLab:wavenumber_1")
 
@@ -217,6 +235,29 @@ def main_loop(tagger, saving_path=None, is_scanning=False):
 
         time.sleep(initialization_params["refresh_rate"])
 
+
+def load_settings():
+    try:
+        with open(SETTINGS_PATH, 'r') as f:
+            settings = json.load(f)
+        return {
+            "saving_folder": settings.get("saving_folder", ""),
+            "saving_file": settings.get("saving_file", ""),
+        }
+    except Exception as e:
+        print(f"Error loading settings: {e}")
+        return ""
+
+def update_settings_file(saving_file):
+    try:
+        with open(SETTINGS_PATH, 'r') as f:
+            settings = json.load(f)
+        settings["saving_file"] = saving_file
+        with open(SETTINGS_PATH, 'w') as f:
+            json.dump(settings, f)
+    except Exception as e:
+        print(f"Error updating settings file: {e}")
+
 def metadata_writer(folder_location, data_complete_path):
     """
     Writes some metadata to a 
@@ -237,25 +278,23 @@ def metadata_writer(folder_location, data_complete_path):
         metadata_df = pd.DataFrame(payload, index=[0])
 
 if __name__ == "__main__":
-    tagger = Tagger()
     parser = argparse.ArgumentParser()
-    parser.add_argument("--save_path", type=str, required=True)
     parser.add_argument("--refresh_rate", type=float, default=0.5)
     parser.add_argument("--is_scanning", type=bool, default=False)
     args = parser.parse_args()
     initialization_params["refresh_rate"] = args.refresh_rate
     
-    save_path = args.save_path
+    folder_location = load_settings()["saving_folder"]
+    # save_path = args.save_path
     time_now = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     identifier = str(time_now).replace(":", "-").replace(" ", "_").replace("-", "_")
-    folder_location = save_path if os.path.isdir(save_path) else os.path.dirname(save_path)
     if not os.path.exists(folder_location):
         os.makedirs(folder_location, exist_ok=True)
-        
-    name = "tagger_monitor_data_" + identifier + "." + SAVING_FORMAT if os.path.isdir(save_path) else os.path.basename(save_path).split(".")[0] + "_" + identifier+ "." + SAVING_FORMAT
+    name = "scan_" + identifier + "." + SAVING_FORMAT
     save_path = os.path.join(folder_location, name)
-    write_settings(save_path)
+    update_settings_file(save_path)
     metadata_writer(folder_location, save_path)
     initialization_params["save_path"] = save_path
     print(f"Saving data to {save_path}")
+    tagger = Tagger()
     main_loop(tagger, save_path, args.is_scanning)

@@ -288,7 +288,7 @@ if __name__ == "__main__":
     identifier = str(time_now).replace(":", "-").replace(" ", "_").replace("-", "_")
     if not os.path.exists(folder_location):
         os.makedirs(folder_location, exist_ok=True)
-    name = "tagger_" + "." + SAVING_FORMAT
+    name = "tagger_" + identifier + "." + SAVING_FORMAT
     save_path = os.path.join(folder_location, name)
     update_settings_file(save_path)
     metadata_writer(folder_location, save_path)
