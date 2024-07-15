@@ -9,17 +9,7 @@ sys.path.append(father_path)
 from fast_tagger_gui.gui.launching_gui import SimpleGUI
 import subprocess
 from PyQt5.QtWidgets import QApplication
-from threading import Thread
-import sys
-import os
-import json
-from PyQt5.QtWidgets import QApplication
-from fast_tagger_gui.gui.launching_gui import SimpleGUI
-import sys
-import os
-import json
-from PyQt5.QtWidgets import QApplication
-from fast_tagger_gui.gui.launching_gui import SimpleGUI
+
 
 def build_script_command(script_path, refresh_rate=0.5, is_scanning=False):
     command = f"\"{script_path}\" --refresh_rate {refresh_rate} --is_scanning {is_scanning}"
