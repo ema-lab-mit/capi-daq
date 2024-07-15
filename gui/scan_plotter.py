@@ -127,10 +127,7 @@ class TaggerVisualizer:
     def events_per_bunch(self):
         try:
             rolled_df = (
-                self.data.groupby("bunch")
-                .n_events.sum()
-                .rolling(self.rolling_window)
-                .sum()
+                data.groupby("bunch").n_events.sum().rolling(self.rolling_window).sum()
             )
             bunches = rolled_df.index
             num_events = rolled_df.values
@@ -354,8 +351,7 @@ def main():
                     notrigger_filtered = notrigger_df
 
                 events_vs_wavenumber_plot.plotly_chart(
-                    viz.events_vs_wavenumber(),
-                    use_container_width=True,
+                    viz.events_vs_wavenumber(), use_container_width=True
                 )
                 events_over_time_plot.plotly_chart(
                     viz.events_over_time(), use_container_width=True
