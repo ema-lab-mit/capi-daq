@@ -7,7 +7,7 @@ from PyQt5.QtCore import Qt, QTimer
 from threading import Thread
 import subprocess
 import psutil
-
+import time 
 SETTINGS_PATH = "C:\\Users\\EMALAB\\Desktop\\TW_DAQ\\fast_tagger_gui\\settings.json"
 
 class CustomButton(QPushButton):
@@ -279,7 +279,8 @@ class SimpleGUI(QWidget):
         thread_streamlit.start()
 
     def launch_streamlit_thread(self):
-        command = f"streamlit run {self.plotting_script}"
+        # command = f"streamlit run {self.plotting_script}"
+        command = f"python {self.plotting_script}"
         process = subprocess.Popen(command, shell=True)
         self.processes['streamlit'] = psutil.Process(process.pid)
         self.plot_button.set_running(True)
@@ -313,7 +314,7 @@ class SimpleGUI(QWidget):
         self.run_scripts_button.set_running(True)
 
     def run_scanning_plotter_thread(self):
-        command = f"streamlit run {self.scanning_plotter}"
+        command = f"python {self.scanning_plotter}"
         process = subprocess.Popen(command, shell=True)
         self.processes['scanning_plotter'] = psutil.Process(process.pid)
         self.status_label.setText('Scan Running')

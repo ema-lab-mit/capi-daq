@@ -20,7 +20,7 @@ if __name__ == "__main__":
     
     SETTINGS_PATH = "C:\\Users\\EMALAB\\Desktop\\TW_DAQ\\fast_tagger_gui\\settings.json"
     PATH_TAGGER_SCRIPT = "C:\\Users\\EMALAB\\Desktop\\TW_DAQ\\fast_tagger_gui\\scripts\\run_tagger.py"
-    PATH_TAGGER_PLOTTER = "C:\\Users\\EMALAB\\Desktop\\TW_DAQ\\fast_tagger_gui\\gui\\no_scan_plotter.py"
+    PATH_TAGGER_PLOTTER = "C:\\Users\\EMALAB\\Desktop\\TW_DAQ\\fast_tagger_gui\\gui\\tagger_plotter.py"
     PATH_SCAN_SCRIPT = "C:\\Users\\EMALAB\\Desktop\\TW_DAQ\\fast_tagger_gui\\scripts\\run_scan.py"
     PATH_SCANNING_PLOTTER = "C:\\Users\\EMALAB\\Desktop\\TW_DAQ\\fast_tagger_gui\\gui\\scan_plotter.py"
 
