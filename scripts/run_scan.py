@@ -27,7 +27,8 @@ from fast_tagger_gui.src.system_utils import (
     update_settings_file, 
     metadata_writer,
 )
-os.system("influxd")
+
+# os.system("influxd")
 
 SETTINGS_PATH = "C:\\Users\\EMALAB\\Desktop\\TW_DAQ\\fast_tagger_gui\\settings.json"
 MAX_DF_LENGTH_IN_MEMORY_IF_SCANNING = 1_000_000

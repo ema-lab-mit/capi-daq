@@ -82,6 +82,7 @@ class Tagger():
 
     def get_data(self, timeout=2):
         start = time.time()
+        last_trigger_time = 0
         while time.time() - start < timeout:
             status, data = self.card.getPackets()
             if status == 0:  # trigger detected, so there is data
@@ -89,7 +90,20 @@ class Tagger():
                     print('no data')
                     return None
                 else:
-                    return data
+                    new_data = []
+                    for d in data:
+                        _t = time.time() # -> Gives the time in seconds since the epoch as a floating point number
+                        # d has:  [packet_number, events, channel, flops since last trigger]
+                        if d[2] == -1:
+                            # If the d is a trigger signal we update the last trigger time
+                            d[-1] = 0#flops_to_time(d[-1])
+                            d.append(_t)
+                        # if the d is an event, we can compute the time since the last trigger
+                        else:
+                            d[-1] = flops_to_time(d[-1])
+                            d.append(_t + d[-1])
+                        new_data.append(d)  
+                    return new_data
             elif status == 1:  # no trigger seen yet, go to sleep for a bit and try again
                 time.sleep(0.001)
             else:

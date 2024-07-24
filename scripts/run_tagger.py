@@ -4,12 +4,10 @@ import time
 import pandas as pd
 import queue
 import argparse
-import ntplib
 import threading
 from datetime import datetime, timedelta
 import json
 from influxdb_client import InfluxDBClient, Point, WritePrecision
-from threading import Lock, Thread
 from influxdb_client.client.write_api import SYNCHRONOUS
 this_path = os.path.abspath(__file__)
 father_path = "C:\\Users\\EMALAB\\Desktop\\TW_DAQ"
@@ -23,16 +21,20 @@ from fast_tagger_gui.src.system_utils import (
     update_settings_file, 
     metadata_writer,
 )
+from epics import PV
 
 SETTINGS_PATH = "C:\\Users\\EMALAB\\Desktop\\TW_DAQ\\fast_tagger_gui\\settings.json"
-MAX_DF_LENGTH_IN_MEMORY_IF_SCANNING = 1_000_000
+POSTING_BATCH_SIZE = 2
 db_token = get_secrets()
 os.environ["INFLUXDB_TOKEN"] = db_token
 INFLUXDB_URL = "http://localhost:8086"
 INFLUXDB_TOKEN = db_token
 INFLUXDB_ORG = "EMAMIT"
 INFLUXDB_BUCKET = "DAQ"
-
+wavenumbers_pv_names = ["LaserLab:wavenumber_1", "LaserLab:wavenumber_2", "LaserLab:wavenumber_3", "LaserLab:wavenumber_4"]
+    
+global wavenumbers_pvs
+wavenumbers_pvs = [PV(name) for name in wavenumbers_pv_names]
 def get_card_settings(settings_path=SETTINGS_PATH):
     try:
         with open(settings_path, 'r') as f:
@@ -54,6 +56,7 @@ modified_settings = get_card_settings()
 STOP_TIME_WINDOW = modified_settings.get("tof_end", 20e-6)
 INIT_TIME = modified_settings.get("tof_start", 1e-6)
 CHANNEL_LEVEL = modified_settings.get("channel_level", -0.5)
+TRIGGER_LEVEL = modified_settings.get("trigger_level", -0.5)
 SAVING_FORMAT = modified_settings.get("data_format", "parquet")
 SAVING_FILE = modified_settings.get("saving_file", "data.parquet")
 
@@ -72,38 +75,35 @@ initialization_params = {
 client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
 write_api = client.write_api(write_options=SYNCHRONOUS)
 
+def get_wnum(i=1):
+    try:
+        return round(float(wavenumbers_pvs[i - 1].get()), 5)
+    except Exception as e:
+        print(f"Error getting wavenumber: {e}")
+        return 0.00000
+
+def get_all_wavenumbers():
+    return [get_wnum(i) for i in range(1, 5)]
+    
 def write_to_influxdb(data, data_name):
     points = []
+    wns = get_all_wavenumbers()
     for d in data:
-        dt = datetime.now()
-        bunch = int(d[0])
-        nevents = int(d[1])
-        channels = float(d[2])
-        timestamp = float(d[3])
-        point_bunch = Point("tagger_data").tag("type", data_name).field("bunch", bunch).time(dt, WritePrecision.NS)
-        points.append(point_bunch)
-        point_n_events = Point("tagger_data").tag("type", data_name).field("n_events", nevents).time(dt, WritePrecision.NS)
-        points.append(point_n_events)
-        point_channels = Point("tagger_data").tag("type", data_name).field("channels", channels).time(dt, WritePrecision.NS)
-        points.append(point_channels)
-        point_timestamp = Point("tagger_data").tag("type", data_name).field("timestamp", timestamp).time(dt, WritePrecision.NS)
-        points.append(point_timestamp)
+        dt = datetime.fromtimestamp(d[4])
+        # d: Bunch id, number of events, channels, time offset, timestamp
+        # d[0]: Bunch id
+        points.append(Point("tagger_data").tag("type", data_name).field("bunch", d[0]).time(dt, WritePrecision.NS))
+        # d[1]: Number of events
+        points.append(Point("tagger_data").tag("type", data_name).field("n_events", d[1]).time(dt, WritePrecision.NS))
+        # d[2]: Channels
+        points.append(Point("tagger_data").tag("type", data_name).field("channel", d[2]).time(dt, WritePrecision.NS))
+        # d[3]: Time offset
+        points.append(Point("tagger_data").tag("type", data_name).field("time_offset", float(d[3])).time(dt, WritePrecision.NS))
+        # d[4]: Timestamp
+        points.append(Point("tagger_data").tag("type", data_name).field("timestamp", d[4]).time(dt, WritePrecision.NS))
+        # Wavenumbers
+        points+=[Point("tagger_data").tag("type", data_name).field(f"wn_{i}", wns[i-1]).time(dt, WritePrecision.NS) for i in [1, 2, 3, 4]]
     write_api.write(bucket=INFLUXDB_BUCKET, record=points)
-
-def write_to_parquet(df, saving_path: str):
-    if not df.empty:
-        df.to_parquet(saving_path, index=False, compression='snappy')
-
-def parquet_writer_thread(queue, saving_path):
-    while True:
-        df = queue.get()
-        write_to_parquet(df, saving_path)
-        queue.task_done()
-
-def build_dataframe(data):
-    df = pd.DataFrame(data=data, columns=["bunch", "n_events", "channels", "timestamp"])
-    df['timestamp'] = df['timestamp'].apply(flops_to_time)
-    return df
 
 def process_input_args():
     parser = argparse.ArgumentParser()
@@ -120,15 +120,22 @@ def create_saving_path(folder_location, saving_format, label = "scan_"):
     name = label + identifier + "." + saving_format
     return os.path.join(folder_location, name)
 
-
 def main_loop(tagger, data_name):
     tagger.set_trigger_falling()
-    tagger.set_trigger_level(-0.4)
+    tagger.set_trigger_level(float(TRIGGER_LEVEL))
     tagger.start_reading()
+    i = 0
+    batched_data = []
     while True:
         data = tagger.get_data()
         if data is not None:
-            write_to_influxdb(data, data_name)
+            batched_data += data
+            i += 1
+            if i % POSTING_BATCH_SIZE == 0:
+                write_to_influxdb(batched_data, data_name)
+                del batched_data
+                batched_data = []
+                
 
 if __name__ == "__main__":
     refresh_rate, is_scanning = process_input_args()
