@@ -332,7 +332,7 @@ def update_refresh_rate(refresh_rate):
 def update_plots(n_intervals, relayout_data):
     global viz_tool
     file_location = load_path()["saving_file"]
-    measurement_name = file_location.split("monitor_")[-1].split(".")[0]
+    measurement_name = file_location.split("scan_")[-1].split(".")[0]
     minus_time_str = string_to_unix_timestamp(measurement_name)
     new_data = query_influxdb(minus_time_str, measurement_name)
     if new_data.empty:

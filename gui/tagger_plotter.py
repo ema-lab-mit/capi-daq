@@ -52,7 +52,7 @@ class PlotGenerator:
         self.tof_hist_max = settings_dict.get("tof_hist_max", 20e-6)
         self.rolling_window = settings_dict.get("rolling_window", 100)
         
-        self._historic_timeseries_columns = ["bunch", "timestamp", "n_events", "channel", "wn_1", "wn_2", "wn_3", "wn_4"]
+        self._historic_timeseries_columns = ["bunch", "timestamp", "n_events", "channel", "wn_1", "wn_2", "wn_3", "wn_4", "voltage"]
         self.last_loaded_time = time.time()
         self.historical_data = pd.DataFrame(columns=self._historic_timeseries_columns)
         self.historical_event_numbers = np.array([])
@@ -127,7 +127,7 @@ class PlotGenerator:
         except Exception as e:
             print(f"Error calculating rolling average: {e}")
             rolled_with_numpy = np.zeros(delta_ts[roll-1:])
-        fig.add_trace(go.Scatter(x=delta_ts[roll-1:], y=rolled_with_numpy, mode="lines", name=f"Integrated {roll} bounches", line=dict(color="red")))
+        fig.add_trace(go.Scatter(x=delta_ts[roll-1:], y=rolled_with_numpy, mode="lines", name=f"Integrated {roll} B", line=dict(color="red")))
         # Generate the Bollinger Bands
         upper_band = rolled_with_numpy + 2 * np.std(rolled_with_numpy)
         lower_band = rolled_with_numpy - 2 * np.std(rolled_with_numpy)
@@ -216,6 +216,25 @@ class PlotGenerator:
         )
         return fig
 
+    def plot_voltage(self, max_points=10_000):
+        fig = go.Figure()
+        if self.historical_data.empty:
+            return fig
+        delta_ts = self.historical_data["timestamp"] - self.first_time
+        if "voltage" in self.historical_data.columns and self.historical_data["voltage"].mean() > 0:
+            last_data = self.historical_data["voltage"].iloc[-1]
+            decimation_factor = (len(delta_ts) // max_points) if len(delta_ts) > max_points else 1
+            decimated_ts = delta_ts[::decimation_factor]
+            decimated_data = self.historical_data["voltage"][::decimation_factor]
+            fig.add_trace(go.Scatter(x=decimated_ts, y=decimated_data, mode="lines", name=f"Voltage = {round(last_data, 12)}", line=dict(color="orange")))
+
+        fig.update_layout(
+            xaxis_title="Time",
+            yaxis_title="Voltage",
+            uirevision='voltage'  # Preserve UI state
+        )
+        return fig
+
     def estimate_rates(self, unseen_new_data: pd.DataFrame) -> pd.Series:
         if self.unseen_new_data.empty:
             return pd.Series()
@@ -272,7 +291,7 @@ class PlotGenerator:
                 number={'suffix': " Hz"}
             ))
 
-            gauges.append(dbc.Col(dcc.Graph(figure=gauge_fig), width=12 // len(channels)))
+            gauges.append(dbc.Row(dcc.Graph(figure=gauge_fig, style={'height': '150px'}), className="mb-3"))
 
         return gauges
 
@@ -285,7 +304,7 @@ def query_influxdb(minus_time_str, measurement_name):
     |> filter(fn: (r) => r.type == "{measurement_name}")
     |> tail(n: {NBATCH})
     |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
-    |> keep(columns: ["_time", "bunch", "n_events", "channel", "time_offset", "timestamp", "wn_1", "wn_2", "wn_3", "wn_4"])
+    |> keep(columns: ["_time", "bunch", "n_events", "channel", "time_offset", "timestamp", "wn_1", "wn_2", "wn_3", "wn_4", "voltage"])
     '''
     try:
         result = client.query_api().query(query=query, org=INFLUXDB_ORG)
@@ -296,11 +315,11 @@ def query_influxdb(minus_time_str, measurement_name):
         df = pd.DataFrame(records).tail(NBATCH).dropna()
         df = df.rename(columns={'_time': 'time'})
         df['time'] = pd.to_datetime(df['time'])
-        column_order = ['time', 'bunch', 'n_events', 'channel', 'time_offset', 'timestamp', 'wn_1', 'wn_2', 'wn_3', 'wn_4']
+        column_order = ['time', 'bunch', 'n_events', 'channel', 'time_offset', 'timestamp', 'wn_1', 'wn_2', 'wn_3', 'wn_4', 'voltage']
         return df[column_order]
     except Exception as e:
         print(f"Error querying InfluxDB: {e}")
-        return pd.DataFrame(columns=['time', 'bunch', 'n_events', 'channel', 'time_offset', "timestamp", 'wn_1', 'wn_2', 'wn_3', 'wn_4'])
+        return pd.DataFrame(columns=['time', 'bunch', 'n_events', 'channel', 'time_offset', "timestamp", 'wn_1', 'wn_2', 'wn_3', 'wn_4', 'voltage'])
 
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
 
@@ -348,15 +367,13 @@ app.layout = dbc.Container([
     dbc.Row([
         dbc.Col([
             dcc.Graph(id='wavenumbers', style={'height': '300px'}),
-            dbc.Row([
-                dbc.Col(width=4),  # Left padding
-                dbc.Col(dbc.Button("+", id="wavenumbers-settings-button", n_clicks=0, className="d-block mx-auto"), width=4),  # Centered button
-                dbc.Col(width=4)  # Right padding
-            ])
-        ], width=6),
+        ], width=4),
         dbc.Col([
-            dbc.Row(id='channel-gauges', style={'height': '100px'})
-        ], width=6)
+            dcc.Graph(id='voltage', style={'height': '300px'}),
+        ], width=4),
+        dbc.Col([
+            dbc.Container(id='channel-gauges', fluid=True)
+        ], width=4),
     ]),
     dcc.Interval(id='interval-component', interval=0.3*1000, n_intervals=0),
     dbc.Offcanvas(
@@ -426,6 +443,19 @@ app.layout = dbc.Container([
         id="wavenumbers-settings-modal",
         is_open=False,
     ),
+    dbc.Modal(
+        [
+            dbc.ModalHeader("Voltage Settings"),
+            dbc.ModalBody([
+                dbc.Label("Voltage Plot Settings (Not customizable in this example)"),
+            ]),
+            dbc.ModalFooter([
+                dbc.Button("Close", id="close-voltage-modal", className="ml-auto")
+            ])
+        ],
+        id="voltage-settings-modal",
+        is_open=False,
+    ),
 ], fluid=True)
 
 viz_tool = PlotGenerator()
@@ -457,6 +487,16 @@ def toggle_tof_settings(n1, n2, is_open):
     [State("wavenumbers-settings-modal", "is_open")]
 )
 def toggle_wavenumbers_settings(n1, n2, is_open):
+    if n1 or n2:
+        return not is_open
+    return is_open
+
+@app.callback(
+    Output("voltage-settings-modal", "is_open"),
+    [Input("voltage-settings-button", "n_clicks"), Input("close-voltage-modal", "n_clicks")],
+    [State("voltage-settings-modal", "is_open")]
+)
+def toggle_voltage_settings(n1, n2, is_open):
     if n1 or n2:
         return not is_open
     return is_open
@@ -496,6 +536,7 @@ def update_tof_histogram_settings(n_clicks, tof_hist_min, tof_hist_max, tof_hist
     [Output('events-over-time', 'figure'),
      Output('tof-histogram', 'figure'),
      Output('wavenumbers', 'figure'),
+     Output('voltage', 'figure'),
      Output('channel-gauges', 'children'),
      Output('summary-statistics', 'children')],
     [Input('interval-component', 'n_intervals'),
@@ -514,7 +555,7 @@ def update_plots(n_intervals, clear_clicks, events_roll, update_histogram_clicks
 
         if ctx.triggered and 'clear-data' in ctx.triggered[0]['prop_id'] or viz_tool.total_events > TOTAL_MAX_POINTS:
             viz_tool = PlotGenerator()
-            return go.Figure(), go.Figure(), go.Figure(), [], [dbc.Col("No data available.", width=12)]
+            return go.Figure(), go.Figure(), go.Figure(), go.Figure(), [], [dbc.Col("No data available.", width=12)]
 
         if 'tof-histogram.relayoutData' in ctx.triggered[0]['prop_id'] and tof_relayout_data:
             if 'xaxis.range[0]' in tof_relayout_data and 'xaxis.range[1]' in tof_relayout_data:
@@ -541,10 +582,16 @@ def update_plots(n_intervals, clear_clicks, events_roll, update_histogram_clicks
         except Exception as e:
             print(f"Error updating wavenumbers: {e}")
             fig_wavenumbers = go.Figure()
+        try:
+            fig_voltage = viz_tool.plot_voltage()
+        except Exception as e:
+            print(f"Error updating voltage plot: {e}")
+            fig_voltage = go.Figure()
         gauges = viz_tool.plot_channel_distribution()
         fig_events_over_time.update_layout(uirevision='events_over_time')
         fig_tof_histogram.update_layout(uirevision='tof_histogram')
         fig_wavenumbers.update_layout(uirevision='wavenumbers')
+        fig_voltage.update_layout(uirevision='voltage')
         summary_text = [
             dbc.Col(f"Number of Total Bunches: {len(viz_tool.historical_data['bunch'].unique())}", width=3),
             dbc.Col(f"Total Events: {viz_tool.total_events}", width=3),
@@ -552,10 +599,10 @@ def update_plots(n_intervals, clear_clicks, events_roll, update_histogram_clicks
             dbc.Col(f"Time since last event: {round(time.time() - viz_tool.historical_data.query('channel!=-1')['timestamp'].max(), 3)} s", width=3),
         ]
 
-        return fig_events_over_time, fig_tof_histogram, fig_wavenumbers, gauges, summary_text
+        return fig_events_over_time, fig_tof_histogram, fig_wavenumbers, fig_voltage, gauges, summary_text
     except Exception as e:
         print(f"Error updating plots: {e}")
-        return go.Figure(), go.Figure(), go.Figure(), [], [dbc.Col("No data available.", width=12)]
+        return go.Figure(), go.Figure(), go.Figure(), go.Figure(), [], [dbc.Col("No data available.", width=12)]
 
 if __name__ == "__main__":
     app.run_server(debug=True)
