@@ -3,6 +3,7 @@ from dash import dcc, html, Input, Output, State
 import dash_bootstrap_components as dbc
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.express as px
 import numpy as np
 from datetime import datetime
 import os
@@ -12,8 +13,6 @@ from influxdb_client import InfluxDBClient
 from scipy.stats import norm
 
 warnings.simplefilter("ignore")
-first_time = 0
-
 
 # Set up paths and tokens
 this_path = os.path.abspath(__file__)
@@ -21,6 +20,7 @@ father_path = "C:\\Users\\EMALAB\\Desktop\\TW_DAQ"
 sys.path.append(father_path)
 from fast_tagger_gui.src.system_utils import get_secrets, load_path
 from fast_tagger_gui.src.physics_utils import compute_tof_from_data
+import time
 
 db_token = get_secrets()
 os.environ["INFLUXDB_TOKEN"] = db_token
@@ -29,76 +29,157 @@ SETTINGS_PATH = "C:\\Users\\EMALAB\\Desktop\\TW_DAQ\\fast_tagger_gui\\settings.j
 INFLUXDB_TOKEN = db_token
 INFLUXDB_ORG = "EMAMIT"
 INFLUXDB_BUCKET = "DAQ"
+NBATCH = 1_000
+TOTAL_MAX_POINTS = int(1e8)
+
+default_settings = {
+    "tof_hist_nbins": 100,
+    "tof_hist_min": 1e-6,
+    "tof_hist_max": 20e-6,
+    "rolling_window": 100,
+}
 
 client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
 query_api = client.query_api()
 
-def events_numbers(og_data: pd.DataFrame):
-    data = og_data.copy()[["bunch", "time", "n_events"]]
-    number_of_events = data.drop_duplicates(subset=["bunch"])
-    return number_of_events[['bunch', 'n_events']]
-
 class PlotGenerator:
-    def __init__(self, data):
-        self.data = data
-
-    def plot_events_over_time(self, timewindow=120, max_points=1_000):
-        global first_time
-        time_delta = pd.Timedelta(seconds=timewindow)
-        last_data = self.data.tail(5_000)[self.data['time'] > self.data['time'].max() - time_delta]
+    def __init__(self, settings_dict: dict = default_settings):
+        self.settings_dict = settings_dict
+        self.tof_hist_nbins = settings_dict.get("tof_hist_nbins", 100)
+        self.tof_hist_min = settings_dict.get("tof_hist_min", 0)
+        self.tof_hist_max = settings_dict.get("tof_hist_max", 20e-6)
+        self.rolling_window = settings_dict.get("rolling_window", 100)
         
-        # Decimate data if necessary
-        if len(last_data) > max_points:
-            last_data = last_data.iloc[::len(last_data)//max_points]
-        last_data['time_in_seconds'] = (last_data['time'] - first_time).dt.total_seconds()
-        last_data['time_in_seconds'] = last_data['time_in_seconds'].astype(int)
-        events_over_time = last_data.query("channels != -1").groupby('time_in_seconds').size()
-        rolling_mean = events_over_time.rolling(window=5).mean()
-        rolling_std = events_over_time.rolling(window=5).std()
-        upper_band = rolling_mean + 2 * rolling_std
-        lower_band = rolling_mean - 2 * rolling_std
+        self._historic_timeseries_columns = ["bunch", "timestamp", "n_events", "channel", "wn_1", "wn_2", "wn_3", "wn_4"]
+        self.last_loaded_time = time.time()
+        self.historical_data = pd.DataFrame(columns=self._historic_timeseries_columns)
+        self.historical_event_numbers = np.array([])
+        self.historical_events_times = np.array([])
+        self.historical_trigger_numbers = np.array([])
+        self.first_time = time.time()
+        
+        self.total_events = 0
+        self.tof_mean = 0
+        self.tof_var = 0
+        self.last_rates = pd.Series()
+        
+        self.tof_histogram_bins = np.linspace(self.tof_hist_min, self.tof_hist_max, self.tof_hist_nbins + 1)
+        self.histogram_counts = np.zeros(self.tof_hist_nbins)
+        
 
+    def _update_tof_statistics(self, unseen_new_data):
+        events_data = unseen_new_data.query("channel != -1")
+        self.total_events += len(events_data)
+        events_offset = events_data["time_offset"].values
+        new_hist_counts, _ = np.histogram(events_offset, bins=self.tof_histogram_bins)
+        self.histogram_counts = self.histogram_counts + new_hist_counts
+        # Now use this histogram to estimate the mean and variance of the time of flight
+        self.tof_mean = np.average(self.tof_histogram_bins[:-1], weights=self.histogram_counts)
+        self.tof_var = np.average((self.tof_histogram_bins[:-1] - self.tof_mean)**2, weights=self.histogram_counts)
+        
+    def _update_historical_data(self, unseen_new_data):
+        self.historical_event_numbers = np.append(self.historical_event_numbers, unseen_new_data.query("channel !=-1")["n_events"].values)
+        self.historical_events_times = np.append(self.historical_events_times, unseen_new_data.query("channel !=-1")["timestamp"].values)
+        rolled_new_data = unseen_new_data[self._historic_timeseries_columns].rolling(window=self.rolling_window).mean()
+        self.historical_data = pd.concat([self.historical_data, rolled_new_data], ignore_index=True)
+        
+    def update_content(self, new_data):
+        unseen_new_data = new_data[new_data['timestamp'] > self.last_loaded_time]
+        self.last_loaded_time = new_data['timestamp'].max()
+        self.unseen_new_data = unseen_new_data
+        if unseen_new_data.empty:
+            print("No new data to update!")
+            return
+        self._update_tof_statistics(unseen_new_data)
+        self._update_historical_data(unseen_new_data)
+        if self.historical_data.shape[0] > TOTAL_MAX_POINTS:
+            self.historical_data = self.historical_data.tail(TOTAL_MAX_POINTS)
+        # Append the new data to the historical data
+        self.historical_data = pd.concat([self.historical_data, unseen_new_data], ignore_index=True)
+
+    def plot_events_over_time(self, max_points=1_000, roll=50):
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=events_over_time.index, y=events_over_time.values, mode="lines", name="Events per Second", line=dict(color="blue")))
-        fig.add_trace(go.Scatter(x=rolling_mean.index, y=rolling_mean, mode="lines", name="Rolling Mean (10s)", line=dict(color="orange")))
-        fig.add_trace(go.Scatter(x=upper_band.index, y=upper_band, mode="lines", name="Upper Bollinger Band", line=dict(color="green"), fill="tonexty", fillcolor="rgba(0, 255, 0, 0.2)"))
-        fig.add_trace(go.Scatter(x=lower_band.index, y=lower_band, mode="lines", name="Lower Bollinger Band", line=dict(color="red"), fill="tonexty", fillcolor="rgba(255, 0, 0, 0.2)"))
+        if self.historical_data.empty:
+            return fig
+        events = self.historical_event_numbers
+        times = self.historical_events_times
+        delta_ts = times - self.first_time
+        if len(delta_ts) > max_points:
+            events = events[-max_points:]
+            delta_ts = delta_ts[-max_points:]
         
+        fig.add_trace(go.Scatter(x=delta_ts, y=events, mode="markers", name="Events", marker=dict(color="blue")))
+        rolled_with_numpy = np.convolve(events, np.ones(roll) / roll, mode="valid")
+        fig.add_trace(go.Scatter(x=delta_ts, y=rolled_with_numpy, mode="lines", name="Rolling Mean", line=dict(color="red")))
+
         fig.update_layout(
-            xaxis_title="Time (seconds)",
+            xaxis_title="Time (Since Start)",
             yaxis_title="Events Over Time",
             title="Events Over Time",
-            yaxis=dict(range=[0, None])  # Set the y-axis minimum to 0
+            yaxis=dict(range=[0, None])
         )
-        
         return fig
 
     def plot_tof_histogram(self):
-        tofs = compute_tof_from_data(self.data.tail(500))
-        mu, std = norm.fit(tofs)
-        xmin, xmax = tofs.min(), tofs.max()
-        x = np.linspace(xmin, xmax, 100)
-        p = norm.pdf(x, mu, std)
-
-        fig = go.Figure()
-        fig.add_trace(go.Histogram(x=tofs, nbinsx=100, name='TOF Data', marker_color='blue', opacity=0.7))
-        fig.add_trace(go.Scatter(x=x, y=p * len(tofs) * (xmax - xmin) / 100, mode='lines', name='Gaussian Fit', line=dict(color='red')))
-        fig.add_trace(go.Scatter(x=[mu], y=[0], mode='markers', marker=dict(color='green', size=10, symbol='x'), name=f'Mean: {mu:.2f} μs'))
-        fig.add_trace(go.Scatter(x=[mu - std, mu + std], y=[0, 0], mode='markers', marker=dict(color='orange', size=10, symbol='line-ew'), name=f'Standard Deviation: {std:.2f} μs'))
-        fig.update_layout(xaxis_title="Time of Flight (μs)", yaxis_title="Events", title="TOF Histogram", showlegend=True)
+        if self.historical_data.empty:
+            return go.Figure()
+        fig = px.bar(x=self.tof_histogram_bins[1:]*1e6, y=self.histogram_counts / self.total_events, labels={"x": "Time of Flight (s)", "y": "Counts"})
+        mean = self.tof_mean * 1e6
+        variance = self.tof_var * 1e12
+        sigma = np.sqrt(variance)
+        x = np.linspace(self.tof_hist_min*1e6, self.tof_hist_max*1e6, 1000)
+        y = norm.pdf(x, mean, sigma) 
+        fig.add_trace(go.Scatter(x=x, y=y, mode="lines", name="Gaussian Fit", line=dict(color="red")))
+        fig.update_layout(
+            xaxis_title="Time of Flight (micro s)",
+            yaxis_title="Probability Density",
+            title="Time of Flight Histogram",
+        )
         return fig
 
-    def plot_events_per_bunch(self):
-        notrigger_df = self.data[self.data['channels'] != -1]
-        events_per_bunch = events_numbers(notrigger_df)
-
+    def plot_wavenumbers(self, new_data, selected_channels = [1, 2, 3, 4]):
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=events_per_bunch["bunch"], y=events_per_bunch["n_events"], mode="lines+markers", name="Events per Bunch", line=dict(color="blue")))
-        fig.update_layout(xaxis_title="Bunch", yaxis_title="Events", title="Events per Bunch", yaxis=dict(range=[0, None]))  # Set the y-axis minimum to 0
+        if self.historical_data.empty:
+            return fig
+        colors = ["blue", "red", "green", "purple"]
+        delta_ts = self.historical_data["timestamp"] - self.first_time
+        for i, channel in enumerate(selected_channels):
+            if f"wn_{channel}" in self.historical_data.columns and self.historical_data[f"wn_{channel}"].mean() > 0:
+                fig.add_trace(go.Scatter(x=delta_ts, y=self.historical_data[f"wn_{channel}"], mode="lines", name=f"WN_{channel}", line=dict(color=colors[i])))
+
+        fig.update_layout(
+            xaxis_title="Time",
+            yaxis_title="Wavenumber",
+            title="Wavenumbers",
+        )
         return fig
 
+    def estimate_rates(self, unseen_new_data: pd.DataFrame) -> pd.Series:
+        if self.unseen_new_data.empty:
+            return pd.Series()
+        channel_ids = unseen_new_data['channel'].unique()
+        rates = {}
+        delta_t = (self.historical_data['timestamp'].max() - self.historical_data['timestamp'].min())
+        for channel_id in channel_ids:
+            filtered_new_data = self.historical_data.query(f"channel == {channel_id}")
+            if channel_id !=-1:
+                event_numbers = len(filtered_new_data)
+                rate = event_numbers / delta_t
+            else:
+                ts = self.historical_data.query("channel == -1").timestamp.diff().mean()
+                rate = 1 / ts
+            rates[channel_id] = rate
+        series = pd.Series(rates).sort_values(ascending=False)
+        self.last_rates = series
+        return series
+    
     def plot_channel_distribution(self):
-        rates = estimate_rates(self.data)
+        if self.historical_data.empty:
+            return []
+        if self.unseen_new_data.empty or self.unseen_new_data['channel'].nunique() == 1:
+            rates = self.last_rates
+        else:
+            rates = self.estimate_rates(self.unseen_new_data)
         channels = rates.index[rates > 0].tolist()
         values = rates[rates > 0].tolist()
 
@@ -107,7 +188,7 @@ class PlotGenerator:
             gauge_fig = go.Figure(go.Indicator(
                 mode="gauge+number",
                 value=value,
-                title={"text": "Trigger" if channel == -1 else f"Channel {channel}", "font": {"size": 14}},
+                title={"text": "Trigger" if channel == -1 else f"Channel {int(channel)}", "font": {"size": 14}},
                 gauge={
                     'axis': {'range': [None, max(values)], 'tickwidth': 1, 'tickcolor': "darkblue"},
                     'bar': {'color': "darkblue"},
@@ -132,9 +213,12 @@ class PlotGenerator:
 
         return gauges
 
-    def plot_trigger_frequency(self):
-        trigger_events = self.data[self.data['channels'] == -1]
-        total_time = (self.data['time'].max() - self.data['time'].max()).total_seconds()
+    def plot_trigger_frequency(self, new_data: pd.DataFrame):
+        if self.new_data.empty:
+            return go.Figure()
+
+        trigger_events = self.data[self.data['channel'] == -1]
+        total_time = (self.data['time'].max() - self.data['time'].min()).total_seconds()
         trigger_frequency = len(trigger_events) / total_time if total_time > 0 else 0
 
         fig = go.Figure()
@@ -147,68 +231,43 @@ class PlotGenerator:
         fig.update_layout(title="Only Trigger Events Detected")
         return fig
 
-def query_influxdb(minus_time_str, measurement_name, aggregate_interval="1s"):
+def query_influxdb(minus_time_str, measurement_name):
     query = f'''
     from(bucket: "{INFLUXDB_BUCKET}")
     |> range(start: {minus_time_str})
     |> filter(fn: (r) => r._measurement == "tagger_data")
     |> filter(fn: (r) => r.type == "{measurement_name}")
+    |> tail(n: {NBATCH})
     |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
-    |> keep(columns: ["_time", "bunch", "n_events", "channels", "timestamp", "wavenumber_1", "wavenumber_2", "wavenumber_3", "wavenumber_4"])
+    |> keep(columns: ["_time", "bunch", "n_events", "channel", "time_offset", "timestamp", "wn_1", "wn_2", "wn_3", "wn_4"])
     '''
     try:
         result = client.query_api().query(query=query, org=INFLUXDB_ORG)
         records = []
-
         for table in result:
             for record in table.records:
                 records.append(record.values)
-                
-        data_wihth_events = [
-            [rec["_time"], rec["bunch"], rec["n_events"], rec["channels"], rec["timestamp"], rec["wavenumber_1"], rec["wavenumber_2"], rec["wavenumber_3"], rec["wavenumber_4"]]
-            for rec in records if (rec["n_events"] > 0 and rec["channels"] != -1)
-        ] 
-        print(data_wihth_events)
-        MAX_EVENTS = 5000
-        df = pd.DataFrame(data_wihth_events)
-        if len(df) > MAX_EVENTS:
-            df = df.iloc[::len(df)//MAX_EVENTS]
-        df.columns = ['_time', 'bunch', 'n_events', 'channels', 'timestamp', 'wavenumber_1', 'wavenumber_2', 'wavenumber_3', 'wavenumber_4']
+        df = pd.DataFrame(records).tail(5000).dropna()
         df = df.rename(columns={'_time': 'time'})
         df['time'] = pd.to_datetime(df['time'])
-        return df
+        column_order = ['time', 'bunch', 'n_events', 'channel', 'time_offset', 'timestamp', 'wn_1', 'wn_2', 'wn_3', 'wn_4']
+        return df[column_order]
     except Exception as e:
         print(f"Error querying InfluxDB: {e}")
-        return pd.DataFrame(columns=['time', 'bunch', 'n_events', 'channels', 'timestamp', 'wavenumber_1', 'wavenumber_2', 'wavenumber_3', 'wavenumber_4'])
-
-def estimate_rates(og_data: pd.DataFrame):
-    initial_time = og_data["time"].min()
-    current_time = og_data["time"].max()
-    min_num_bunches = og_data["bunch"].min()
-    max_num_bunches = og_data["bunch"].max()
-    
-    time_diff = (current_time - initial_time).total_seconds()
-    delta_bunches = max_num_bunches - min_num_bunches
-    trigger_count = delta_bunches / time_diff
-    channel_counts = og_data["channels"].value_counts() 
-    channel_counts = channel_counts.reindex(range(-1, 4), fill_value=0)
-    rates = channel_counts / time_diff
-    print(rates)
-    rates[-1] = trigger_count
-    return rates
+        return pd.DataFrame(columns=['time', 'bunch', 'n_events', 'channel', 'time_offset', "timestamp", 'wn_1', 'wn_2', 'wn_3', 'wn_4'])
 
 def string_to_unix_timestamp(date_string):
     dt = datetime.strptime(date_string, "%Y_%m_%d_%H_%M_%S")
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-# Dash app setup
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
 
 app.layout = dbc.Container([
     dbc.Row([
         dbc.Col([
             html.H1("Scanning Monitor", style={'textAlign': 'center', 'marginBottom': '20px'}),
-            dbc.Button("Settings", id="open-offcanvas", n_clicks=0, color="primary"),
+            dbc.Button("Settings", id="open-offcanvas", n_clicks=0, color="primary", style={'marginRight': '10px'}),
+            dbc.Button("Clear Data", id="clear-data", n_clicks=0, color="danger"),
             dbc.Offcanvas(
                 [
                     dbc.Row([
@@ -233,14 +292,17 @@ app.layout = dbc.Container([
     ]),
     dbc.Row([
         dbc.Col([
-            dcc.Graph(id='events-per-bunch', style={'height': '300px'})
+            dcc.Graph(id='wavenumbers', style={'height': '300px'})
         ], width=6),
         dbc.Col([
             dbc.Row(id='channel-gauges', style={'height': '300px'})
         ], width=6)
     ]),
-    dcc.Interval(id='interval-component', interval=0.1*1000, n_intervals=0)
+    dcc.Interval(id='interval-component', interval=0.5*1000, n_intervals=0)
 ], fluid=True)
+
+viz_tool = PlotGenerator()
+first_time = 0
 
 @app.callback(
     Output("offcanvas", "is_open"),
@@ -262,50 +324,26 @@ def update_refresh_rate(refresh_rate):
 @app.callback(
     [Output('events-over-time', 'figure'),
      Output('tof-histogram', 'figure'),
-     Output('events-per-bunch', 'figure'),
+     Output('wavenumbers', 'figure'),
      Output('channel-gauges', 'children')],
-    [Input('interval-component', 'n_intervals'),
-     Input('clean-data', 'n_clicks')],
+    [Input('interval-component', 'n_intervals')],
     [State('events-over-time', 'relayoutData')]
 )
-def update_plots(n_intervals, n_clicks, relayout_data):
-    global first_time
+def update_plots(n_intervals, relayout_data):
+    global viz_tool
     file_location = load_path()["saving_file"]
-    measurement_name = file_location.split("scan_")[-1].split(".")[0]
+    measurement_name = file_location.split("monitor_")[-1].split(".")[0]
     minus_time_str = string_to_unix_timestamp(measurement_name)
-    
-    # Determine the time range to fetch based on user zoom/pan actions
-    if relayout_data and 'xaxis.range' in relayout_data:
-        start_time, end_time = relayout_data['xaxis.range']
-        start_time = pd.to_datetime(start_time)
-        end_time = pd.to_datetime(end_time)
-        minus_time_str = start_time.strftime("%Y-%m-%dT%H:%M:%SZ")
-        aggregate_interval = f"{int((end_time - start_time).total_seconds() // 100)}s"  # Example aggregation interval
-    else:
-        aggregate_interval = "1s"  # Default aggregation interval
-    
-    data = query_influxdb(minus_time_str, measurement_name, aggregate_interval)
-    print(len(data))
-    if first_time == 0:
-        first_time = data['time'].min()
-    
-    if data.empty:
+    new_data = query_influxdb(minus_time_str, measurement_name)
+    if new_data.empty:
+        print("No new data received")
         return go.Figure(), go.Figure(), go.Figure(), []
-
-    plot_generator = PlotGenerator(data)
-    
-    last_data_batch = data.tail(100)
-    last_signal_events = last_data_batch[last_data_batch['channels'] != -1]
-    if last_signal_events.empty:
-        fig_trigger_frequency = plot_generator.plot_trigger_frequency()
-        return fig_trigger_frequency, go.Figure(), go.Figure(), []
-
-    fig_events_over_time = plot_generator.plot_events_over_time()
-    fig_tof_histogram = plot_generator.plot_tof_histogram()
-    fig_events_per_bunch = plot_generator.plot_events_per_bunch()
-    
-    gauges = plot_generator.plot_channel_distribution()
-    return fig_events_over_time, fig_tof_histogram, fig_events_per_bunch, gauges
+    viz_tool.update_content(new_data)
+    fig_events_over_time = viz_tool.plot_events_over_time()
+    fig_tof_histogram = viz_tool.plot_tof_histogram()
+    fig_wavenumbers = viz_tool.plot_wavenumbers(new_data)
+    gauges = viz_tool.plot_channel_distribution()
+    return fig_events_over_time, fig_tof_histogram, fig_wavenumbers, gauges
 
 if __name__ == "__main__":
     app.run_server(debug=True)

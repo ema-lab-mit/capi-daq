@@ -1,19 +1,16 @@
 # run_scan.py
-# This script is used to run the fast tagger system in a scanning mode. 
-# It reads the data from the TimeTagger and writes it to a file and to the InfluxDB database.
 import sys
 import os
 import time
-import pandas as pd
 import queue
 import argparse
-import ntplib
 import threading
 from datetime import datetime, timedelta
 import json
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
-
+from fastparquet import write, ParquetFile
+import pandas as pd
 from epics import PV
 this_path = os.path.abspath(__file__)
 father_path = "C:\\Users\\EMALAB\\Desktop\\TW_DAQ"
@@ -60,6 +57,7 @@ modified_settings = get_card_settings()
 STOP_TIME_WINDOW = modified_settings.get("tof_end", 20e-6)
 INIT_TIME = modified_settings.get("tof_start", 1e-6)
 CHANNEL_LEVEL = modified_settings.get("channel_level", -0.5)
+TRIGGER_LEVEL = modified_settings.get("trigger_level", -0.5)
 SAVING_FORMAT = modified_settings.get("data_format", "parquet")
 SAVING_FILE = modified_settings.get("saving_file", "data.parquet")
 
@@ -74,64 +72,53 @@ initialization_params = {
     "refresh_rate": 5,
 }
 
-        
 client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
 write_api = client.write_api(write_options=SYNCHRONOUS)
 
-def write_to_influxdb(data, data_name, wnums):
-    points = []
-    for d in data:
-        dt = datetime.now()
-        bunch = int(d[0])
-        nevents = int(d[1])
-        channels = float(d[2])
-        timestamp = float(d[3])
-        point_bunch = Point("tagger_data").tag("type", data_name).field("bunch", bunch).time(dt, WritePrecision.NS)
-        points.append(point_bunch)
-        point_n_events = Point("tagger_data").tag("type", data_name).field("n_events", nevents).time(dt, WritePrecision.NS)
-        points.append(point_n_events)
-        point_channels = Point("tagger_data").tag("type", data_name).field("channels", channels).time(dt, WritePrecision.NS)
-        points.append(point_channels)
-        point_timestamp = Point("tagger_data").tag("type", data_name).field("timestamp", timestamp).time(dt, WritePrecision.NS)
-        points.append(point_timestamp)
-        points_wavenum_1 = Point("tagger_data").tag("type", data_name).field("wavenumber_1", wnums[0]).time(dt, WritePrecision.NS)
-        points.append(points_wavenum_1)
-        points_wavenum_2 = Point("tagger_data").tag("type", data_name).field("wavenumber_2", wnums[1]).time(dt, WritePrecision.NS)
-        points.append(points_wavenum_2)
-        points_wavenum_3 = Point("tagger_data").tag("type", data_name).field("wavenumber_3", wnums[2]).time(dt, WritePrecision.NS)
-        points.append(points_wavenum_3)
-        points_wavenum_4 = Point("tagger_data").tag("type", data_name).field("wavenumber_4", wnums[3]).time(dt, WritePrecision.NS)
-        points.append(points_wavenum_4)
-    write_api.write(bucket=INFLUXDB_BUCKET, record=points)
-
-def write_to_parquet(df, saving_path: str):
-    if not df.empty:
-        df.to_parquet(saving_path, index=False, compression='snappy')
-
-def parquet_writer_thread(queue, saving_path):
-    while True:
-        df = queue.get()
-        write_to_parquet(df, saving_path)
-        queue.task_done()
-
-def build_dataframe(data, wnums):
-    df = pd.DataFrame(data=data, columns=["bunch", "n_events", "channels", "timestamp"])
-    df['timestamp'] = df['timestamp'].apply(flops_to_time)
-    df['wavenumber_1'] = wnums[ 0]
-    df['wavenumber_2'] = wnums[ 1]
-    df['wavenumber_3'] = wnums[ 2]
-    df['wavenumber_4'] = wnums[ 3]
-    return df
-
-def get_wnum(i=0):
+def get_wnum(i=1):
     try:
-        return round(float(wavenumbers_pvs[i].get()), 5)
+        return round(float(wavenumbers_pvs[i - 1].get()), 5)
     except Exception as e:
         print(f"Error getting wavenumber: {e}")
         return 0.00000
+def get_all_wavenumbers():
+    return [get_wnum(i) for i in range(1, 5)]
     
-def get_wavenumbers():
-    return [get_wnum(i) for i in range(4)]
+def write_to_influxdb(data, data_name, wns):
+    points = []
+    for d in data:
+        dt = datetime.fromtimestamp(d[4])
+        points.append(Point("tagger_data").tag("type", data_name).field("bunch", d[0]).time(dt, WritePrecision.NS))
+        points.append(Point("tagger_data").tag("type", data_name).field("n_events", d[1]).time(dt, WritePrecision.NS))
+        points.append(Point("tagger_data").tag("type", data_name).field("channel", d[2]).time(dt, WritePrecision.NS))
+        points.append(Point("tagger_data").tag("type", data_name).field("time_offset", float(d[3])).time(dt, WritePrecision.NS))
+        points.append(Point("tagger_data").tag("type", data_name).field("timestamp", d[4]).time(dt, WritePrecision.NS))
+        points += [Point("tagger_data").tag("type", data_name).field(f"wn_{i}", wns[i-1]).time(dt, WritePrecision.NS) for i in [1, 2, 3, 4]]
+    write_api.write(bucket=INFLUXDB_BUCKET, record=points)
+
+def write_to_parquet_direct(data, wnums, saving_path):
+    schema = {
+        'bunch': 'int64',
+        'n_events': 'int64',
+        'channels': 'int64',
+        'time_offset': 'float64',
+        'timestamp': 'float64',
+        'wn1': 'float64',
+        'wn2': 'float64',
+        'wn3': 'float64',
+        'wn4': 'float64',
+    }
+    df = pd.DataFrame(data, columns=['bunch', 'n_events', 'channels', 'time_offset', 'timestamp'])
+    df['wn1'] = wnums[0]
+    df['wn2'] = wnums[1]
+    df['wn3'] = wnums[2]
+    df['wn4'] = wnums[3]
+    
+    if os.path.exists(saving_path):
+        pf = ParquetFile(saving_path)
+        write(saving_path, df, file_scheme='hive', append=True)
+    else:
+        write(saving_path, df, file_scheme='hive', compression='SNAPPY', write_index=False)
 
 def process_input_args():
     parser = argparse.ArgumentParser()
@@ -150,11 +137,8 @@ def create_saving_path(folder_location, saving_format):
 
 def main_loop(tagger, data_name, saving_file_path=SAVING_FILE):
     tagger.set_trigger_falling()
-    tagger.set_trigger_level(-0.5)
+    tagger.set_trigger_level(float(TRIGGER_LEVEL))
     tagger.start_reading()
-    parquet_queue = queue.Queue()
-    parquet_thread = threading.Thread(target=parquet_writer_thread, args=(parquet_queue, saving_file_path), daemon=True)
-    parquet_thread.start()
     wavenumbers_pv_names = ["LaserLab:wavenumber_1", "LaserLab:wavenumber_2", "LaserLab:wavenumber_3", "LaserLab:wavenumber_4"]
     
     global wavenumbers_pvs
@@ -163,18 +147,16 @@ def main_loop(tagger, data_name, saving_file_path=SAVING_FILE):
     print("Connecting to devices")
     starting_time = datetime.now()
     batch_data = []
-    n_batches_saved = 0
     while True:
         data = tagger.get_data()
-        if (data is not None):
+        if data:
             batch_data += data
-            n_batches_saved += 1
-            current_wnum = get_wavenumbers()
-            write_to_influxdb(data, data_name, current_wnum)
+            wns = get_all_wavenumbers()
+            write_to_influxdb(data, data_name, wns)
             if datetime.now() - starting_time > timedelta(seconds=initialization_params["refresh_rate"]):
-                df = build_dataframe(batch_data, current_wnum)
-                parquet_queue.put(df)
-                # batch_data = []
+                write_to_parquet_direct(batch_data, wns, saving_file_path)
+                batch_data = []
+                starting_time = datetime.now()
 
 if __name__ == "__main__":
     refresh_rate, is_scanning = process_input_args()
