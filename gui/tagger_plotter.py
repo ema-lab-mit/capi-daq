@@ -103,17 +103,38 @@ class PlotGenerator:
         self.last_loaded_time = new_data['timestamp'].max()
         self.unseen_new_data = unseen_new_data
         if unseen_new_data.empty:
-            print("No new data to update!")
-            return
-        self._update_tof_statistics(unseen_new_data)
-        self._update_historical_data(unseen_new_data)
+            self.historical_event_numbers = np.append(self.historical_event_numbers, 0)
+            self.historical_events_times = np.append(self.historical_events_times, time.time())
+        else:
+            self._update_tof_statistics(unseen_new_data)
+            self._update_historical_data(unseen_new_data)
         if self.historical_data.shape[0] > TOTAL_MAX_POINTS:
             self.historical_data = self.historical_data.tail(TOTAL_MAX_POINTS)
         self.historical_data = pd.concat([self.historical_data, unseen_new_data], ignore_index=True)
 
+
+    def estimate_rates(self, unseen_new_data: pd.DataFrame) -> pd.Series:
+        if self.unseen_new_data.empty:
+            return pd.Series()
+        channel_ids = unseen_new_data['channel'].unique()
+        rates = {}
+        delta_t = (self.historical_data['timestamp'].max() - self.historical_data['timestamp'].min())
+        for channel_id in channel_ids:
+            filtered_new_data = self.historical_data.query(f"channel == {channel_id}")
+            if channel_id !=-1:
+                event_numbers = len(filtered_new_data)
+                rate = event_numbers / delta_t
+            else:
+                ts = self.historical_data.query("channel == -1").timestamp.diff().mean()
+                rate = 2 / ts
+            rates[channel_id] = rate
+        series = pd.Series(rates).sort_values(ascending=False)
+        self.last_rates = series
+        return series
+
     def plot_events_over_time(self, max_points=MAX_POINTS_FOR_PLOT, roll=10):
         fig = go.Figure()
-        if self.historical_data.empty:
+        if self.historical_event_numbers.size == 0:
             return fig
         events = self.historical_event_numbers
         times = self.historical_events_times
@@ -121,16 +142,22 @@ class PlotGenerator:
         if len(delta_ts) > max_points:
             events = events[-max_points:]
             delta_ts = delta_ts[-max_points:]
-        
-        try:
+
+        if len(events) < roll:
+            rolled_with_numpy = np.zeros(len(events))
+        else:
             rolled_with_numpy = np.convolve(events, np.ones(roll)/roll, mode="valid")
-        except Exception as e:
-            print(f"Error calculating rolling average: {e}")
-            rolled_with_numpy = np.zeros(delta_ts[roll-1:])
+
         fig.add_trace(go.Scatter(x=delta_ts[roll-1:], y=rolled_with_numpy, mode="lines", name=f"Integrated {roll} B", line=dict(color="red")))
+        
         # Generate the Bollinger Bands
-        upper_band = rolled_with_numpy + 2 * np.std(rolled_with_numpy)
-        lower_band = rolled_with_numpy - 2 * np.std(rolled_with_numpy)
+        if len(rolled_with_numpy) > 0:
+            upper_band = rolled_with_numpy + 2 * np.std(rolled_with_numpy)
+            lower_band = rolled_with_numpy - 2 * np.std(rolled_with_numpy)
+        else:
+            upper_band = np.zeros(len(delta_ts[roll-1:]))
+            lower_band = np.zeros(len(delta_ts[roll-1:]))
+
         fig.add_trace(go.Scatter(x=delta_ts[roll-1:], y=upper_band, mode="lines", name="Upper Band", line=dict(color="green", dash="dash")))
         fig.add_trace(go.Scatter(x=delta_ts[roll-1:], y=lower_band, mode="lines", name="Lower Band", line=dict(color="green", dash="dash")))
 
@@ -144,7 +171,7 @@ class PlotGenerator:
             showlegend=False,
             name='Bollinger Bands'
         ))
-        
+
         fig.update_layout(
             xaxis_title="Monitoring Time (s)",
             yaxis_title="Total Counts (s)",
@@ -195,7 +222,7 @@ class PlotGenerator:
         )
         return fig
 
-    def plot_wavenumbers(self, new_data, selected_channels = [1, 2, 3, 4], max_points=10_000):
+    def plot_wavenumbers(self, new_data, selected_channels=[1, 2, 3, 4], max_points=10_000):
         fig = go.Figure()
         if self.historical_data.empty:
             return fig
@@ -212,9 +239,23 @@ class PlotGenerator:
         fig.update_layout(
             xaxis_title="Time",
             yaxis_title="Wavenumber",
-            uirevision='wavenumbers'  # Preserve UI state
+            uirevision='wavenumbers',  # Preserve UI state
+            legend=dict(
+                x=0.01,  # Position legend inside the plot
+                y=0.99,
+                traceorder="normal",
+                font=dict(
+                    family="sans-serif",
+                    size=12,
+                    color="black"
+                ),
+                bgcolor="LightSteelBlue",
+                bordercolor="Black",
+                borderwidth=1
+            )
         )
         return fig
+
 
     def plot_voltage(self, max_points=10_000):
         fig = go.Figure()
@@ -235,29 +276,9 @@ class PlotGenerator:
         )
         return fig
 
-    def estimate_rates(self, unseen_new_data: pd.DataFrame) -> pd.Series:
-        if self.unseen_new_data.empty:
-            return pd.Series()
-        channel_ids = unseen_new_data['channel'].unique()
-        rates = {}
-        delta_t = (self.historical_data['timestamp'].max() - self.historical_data['timestamp'].min())
-        for channel_id in channel_ids:
-            filtered_new_data = self.historical_data.query(f"channel == {channel_id}")
-            if channel_id !=-1:
-                event_numbers = len(filtered_new_data)
-                rate = event_numbers / delta_t
-            else:
-                ts = self.historical_data.query("channel == -1").timestamp.diff().mean()
-                rate = 1 / ts
-            rates[channel_id] = rate
-        rates[-1] = rates.get(-1, 0) + np.sum([rates[channel_id] for channel_id in channel_ids if channel_id != -1])
-        series = pd.Series(rates).sort_values(ascending=False)
-        self.last_rates = series
-        return series
-    
     def plot_channel_distribution(self):
         if self.historical_data.empty:
-            return []
+            return go.Figure()
         if self.unseen_new_data.empty or self.unseen_new_data['channel'].nunique() == 1:
             rates = self.last_rates
         else:
@@ -265,35 +286,20 @@ class PlotGenerator:
         channels = rates.index[rates > 0].tolist()
         values = rates[rates > 0].tolist()
 
-        gauges = []
-        for channel, value in zip(channels, values):
-            gauge_fig = go.Figure(go.Indicator(
-                mode="gauge+number",
-                value=value,
-                title={"text": "Trigger" if channel == -1 else f"Channel {int(channel)}", "font": {"size": 14}},
-                gauge={
-                    'axis': {'range': [None, max(values)], 'tickwidth': 1, 'tickcolor': "darkblue"},
-                    'bar': {'color': "darkblue"},
-                    'bgcolor': "white",
-                    'borderwidth': 2,
-                    'bordercolor': "gray",
-                    'steps': [
-                        {'range': [0, value], 'color': 'cyan'},
-                        {'range': [value, max(values)], 'color': 'lightgray'}
-                    ],
-                    'threshold': {
-                        'line': {'color': "red", 'width': 4},
-                        'thickness': 0.75,
-                        'value': value
-                    }
-                },
-                domain={'x': [0, 1], 'y': [0, 1]},
-                number={'suffix': " Hz"}
-            ))
+        fig = go.Figure(go.Bar(
+            x=values,
+            y=[f"Channel {int(ch)}" if ch != -1 else "Trigger" for ch in channels],
+            orientation='h'
+        ))
 
-            gauges.append(dbc.Row(dcc.Graph(figure=gauge_fig, style={'height': '150px'}), className="mb-3"))
-
-        return gauges
+        fig.update_layout(
+            xaxis_title="Rate (Hz)",
+            yaxis_title="Channel",
+            template="plotly_white",
+            uirevision='channel_distribution'
+        )
+        
+        return fig
 
 
 def query_influxdb(minus_time_str, measurement_name):
@@ -372,7 +378,7 @@ app.layout = dbc.Container([
             dcc.Graph(id='voltage', style={'height': '300px'}),
         ], width=4),
         dbc.Col([
-            dbc.Container(id='channel-gauges', fluid=True)
+            dcc.Graph(id='channel-distribution', style={'height': '300px'})
         ], width=4),
     ]),
     dcc.Interval(id='interval-component', interval=0.3*1000, n_intervals=0),
@@ -537,7 +543,7 @@ def update_tof_histogram_settings(n_clicks, tof_hist_min, tof_hist_max, tof_hist
      Output('tof-histogram', 'figure'),
      Output('wavenumbers', 'figure'),
      Output('voltage', 'figure'),
-     Output('channel-gauges', 'children'),
+     Output('channel-distribution', 'figure'),
      Output('summary-statistics', 'children')],
     [Input('interval-component', 'n_intervals'),
      Input('clear-data', 'n_clicks'),
@@ -555,7 +561,7 @@ def update_plots(n_intervals, clear_clicks, events_roll, update_histogram_clicks
 
         if ctx.triggered and 'clear-data' in ctx.triggered[0]['prop_id'] or viz_tool.total_events > TOTAL_MAX_POINTS:
             viz_tool = PlotGenerator()
-            return go.Figure(), go.Figure(), go.Figure(), go.Figure(), [], [dbc.Col("No data available.", width=12)]
+            return go.Figure(), go.Figure(), go.Figure(), go.Figure(), go.Figure(), [dbc.Col("No data available.", width=12)]
 
         if 'tof-histogram.relayoutData' in ctx.triggered[0]['prop_id'] and tof_relayout_data:
             if 'xaxis.range[0]' in tof_relayout_data and 'xaxis.range[1]' in tof_relayout_data:
@@ -587,11 +593,18 @@ def update_plots(n_intervals, clear_clicks, events_roll, update_histogram_clicks
         except Exception as e:
             print(f"Error updating voltage plot: {e}")
             fig_voltage = go.Figure()
-        gauges = viz_tool.plot_channel_distribution()
+        try:
+            fig_channel_distribution = viz_tool.plot_channel_distribution()
+        except Exception as e:
+            print(f"Error updating channel distribution plot: {e}")
+            fig_channel_distribution = go.Figure()
+
         fig_events_over_time.update_layout(uirevision='events_over_time')
         fig_tof_histogram.update_layout(uirevision='tof_histogram')
         fig_wavenumbers.update_layout(uirevision='wavenumbers')
         fig_voltage.update_layout(uirevision='voltage')
+        fig_channel_distribution.update_layout(uirevision='channel_distribution')
+
         summary_text = [
             dbc.Col(f"Number of Total Bunches: {len(viz_tool.historical_data['bunch'].unique())}", width=3),
             dbc.Col(f"Total Events: {viz_tool.total_events}", width=3),
@@ -599,10 +612,11 @@ def update_plots(n_intervals, clear_clicks, events_roll, update_histogram_clicks
             dbc.Col(f"Time since last event: {round(time.time() - viz_tool.historical_data.query('channel!=-1')['timestamp'].max(), 3)} s", width=3),
         ]
 
-        return fig_events_over_time, fig_tof_histogram, fig_wavenumbers, fig_voltage, gauges, summary_text
+        return fig_events_over_time, fig_tof_histogram, fig_wavenumbers, fig_voltage, fig_channel_distribution, summary_text
     except Exception as e:
         print(f"Error updating plots: {e}")
-        return go.Figure(), go.Figure(), go.Figure(), go.Figure(), [], [dbc.Col("No data available.", width=12)]
+        return go.Figure(), go.Figure(), go.Figure(), go.Figure(), go.Figure(), [dbc.Col("No data available.", width=12)]
 
 if __name__ == "__main__":
     app.run_server(debug=True)
+ 
