@@ -126,9 +126,9 @@ class PlotGenerator:
             return pd.Series()
         channel_ids = unseen_new_data['channel'].unique()
         rates = {}
-        delta_t = (self.historical_data['timestamp'].max() - self.historical_data['timestamp'].min())
+        delta_t = (unseen_new_data['timestamp'].max() - unseen_new_data['timestamp'].min())
         for channel_id in channel_ids:
-            filtered_new_data = self.historical_data.query(f"channel == {channel_id}")
+            filtered_new_data = unseen_new_data.drop_duplicates("bunch").query(f"channel == {channel_id}")
             if channel_id !=-1:
                 event_numbers = len(filtered_new_data)
                 rate = event_numbers / delta_t
@@ -136,8 +136,6 @@ class PlotGenerator:
                 rate = self.get_trigger_rate()
             rates[channel_id] = rate
         series = pd.Series(rates).sort_values(ascending=False)
-        # The total rate of the trigger channel is -1 summed with the rate of the trigger channel
-        # series[-1] = series[-1] + sum(series[1:])
         self.last_rates = series
         return series
 
@@ -202,10 +200,8 @@ class PlotGenerator:
         sigma = np.sqrt(variance)
         x = np.linspace(self.tof_hist_min*1e6, self.tof_hist_max*1e6, 1000)
         y = norm.pdf(x, mean, sigma) 
-        # Rescale y to match the histogram
         y = y * np.max(self.histogram_counts) / (np.max(y) * total_plotted)
-        
-        fig.add_trace(go.Scatter(x=x, y=y, mode="lines", name="Gaussian Fit", line=dict(color="red")))
+        fig.add_trace(go.Scatter(x=x, y=y, mode="lines", name=f"Fit: ToF={mean:.2f} ± {sigma:.2f} µs", line=dict(color="red"), showlegend=True))
         fig.add_shape(
             dict(
                 type="line",
@@ -216,18 +212,19 @@ class PlotGenerator:
                 line=dict(color="black", width=2)
             )
         )
-        fig.add_annotation(
-            x=mean,
-            y=np.max(y)+0.05,
-            text=f"Fit: ToF={mean:.2f} ± {sigma:.2f} µs",
-            showarrow=False,
-            font=dict(size=12)
-        )
-        
         fig.update_layout(
             xaxis_title="Time of Flight (µs)",
             yaxis_title="Probability Density",
-            uirevision='tof_histogram'  # Preserve UI state
+            uirevision='tof_histogram',  # Preserve UI state
+            legend=dict(
+                yanchor="top",
+                y=0.99,
+                xanchor="left",
+                x=0.01,
+                bgcolor="rgba(255, 255, 255, 0.5)",
+                bordercolor="Black",
+                borderwidth=1
+            )
         )
         return fig
 
