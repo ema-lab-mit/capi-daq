@@ -102,7 +102,7 @@ class PlotGenerator:
         unseen_new_data = new_data[new_data['timestamp'] > self.last_loaded_time]
         self.last_loaded_time = new_data['timestamp'].max()
         self.unseen_new_data = unseen_new_data
-        if unseen_new_data.empty:
+        if unseen_new_data.query("channel!=0").empty:
             self.historical_event_numbers = np.append(self.historical_event_numbers, 0)
             self.historical_events_times = np.append(self.historical_events_times, time.time())
         else:
@@ -112,7 +112,15 @@ class PlotGenerator:
             self.historical_data = self.historical_data.tail(TOTAL_MAX_POINTS)
         self.historical_data = pd.concat([self.historical_data, unseen_new_data], ignore_index=True)
 
-
+    def get_trigger_rate(self):
+        if self.unseen_new_data.empty:
+            return 0
+        number_bunches = self.unseen_new_data['bunch'].max() - self.unseen_new_data['bunch'].min() + 1
+        time_diff = self.unseen_new_data['timestamp'].max() - self.unseen_new_data['timestamp'].min()
+        self.trigger_rate = number_bunches / time_diff
+        print(self.trigger_rate)
+        return self.trigger_rate
+    
     def estimate_rates(self, unseen_new_data: pd.DataFrame) -> pd.Series:
         if self.unseen_new_data.empty:
             return pd.Series()
@@ -125,10 +133,11 @@ class PlotGenerator:
                 event_numbers = len(filtered_new_data)
                 rate = event_numbers / delta_t
             else:
-                ts = self.historical_data.query("channel == -1").timestamp.diff().mean()
-                rate = 2 / ts
+                rate = self.get_trigger_rate()
             rates[channel_id] = rate
         series = pd.Series(rates).sort_values(ascending=False)
+        # The total rate of the trigger channel is -1 summed with the rate of the trigger channel
+        # series[-1] = series[-1] + sum(series[1:])
         self.last_rates = series
         return series
 
@@ -237,7 +246,7 @@ class PlotGenerator:
                 fig.add_trace(go.Scatter(x=decimated_ts, y=decimated_data, mode="lines", name=f"wavenumber_{channel} = {round(last_data, 12)}", line=dict(color=colors[i])))
 
         fig.update_layout(
-            xaxis_title="Time",
+            xaxis_title="Monitoring Time (s)",
             yaxis_title="Wavenumber",
             uirevision='wavenumbers',  # Preserve UI state
             legend=dict(
@@ -270,7 +279,7 @@ class PlotGenerator:
             fig.add_trace(go.Scatter(x=decimated_ts, y=decimated_data, mode="lines", name=f"Voltage = {round(last_data, 12)}", line=dict(color="orange")))
 
         fig.update_layout(
-            xaxis_title="Time",
+            xaxis_title="Monitoring Time (s)",
             yaxis_title="Voltage",
             uirevision='voltage'  # Preserve UI state
         )
@@ -285,11 +294,14 @@ class PlotGenerator:
             rates = self.estimate_rates(self.unseen_new_data)
         channels = rates.index[rates > 0].tolist()
         values = rates[rates > 0].tolist()
-
+        colors = ["blue", "red", "green", "purple"]
         fig = go.Figure(go.Bar(
             x=values,
             y=[f"Channel {int(ch)}" if ch != -1 else "Trigger" for ch in channels],
-            orientation='h'
+            orientation='h',
+            marker=dict(color=colors),
+            text=[f"{value:.2f}" for value in values],
+            textposition='auto'
         ))
 
         fig.update_layout(
@@ -411,12 +423,20 @@ app.layout = dbc.Container([
         [
             dbc.ModalHeader("ToF Histogram Settings"),
             dbc.ModalBody([
-                dbc.Label("Min "),
-                dcc.Input(id='tof-hist-min-input', type='number', value=default_settings['tof_hist_min'], step=1e-6),
-                dbc.Label("ToF Histogram Max\n"),
-                dcc.Input(id='tof-hist-max-input', type='number', value=default_settings['tof_hist_max'], step=1e-6),
+                dbc.Label("ToF Histogram Range (µs)"),
+                dcc.RangeSlider(
+                    id='tof-hist-range-slider',
+                    min=1, max=20, step=1,
+                    value=[default_settings['tof_hist_min']*1e6, default_settings['tof_hist_max']*1e6],
+                    marks={i: str(i) for i in range(1, 21)}
+                ),
                 dbc.Label("Number of Bins"),
-                dcc.Slider(id='tof-bins-slider', min=1, max=100, step=5, value=default_settings['tof_hist_nbins'], marks={i: str(i) for i in range(4, 101, 5)}),
+                dcc.Slider(
+                    id='tof-bins-slider',
+                    min=1, max=100, step=5,
+                    value=default_settings['tof_hist_nbins'],
+                    marks={i: str(i) for i in range(5, 101, 5)}
+                ),
             ]),
             dbc.ModalFooter([
                 dbc.Button("Update Histogram Parameters", id="update-tof-histogram", className="ml-auto"),
@@ -525,18 +545,16 @@ def update_refresh_rate(refresh_rate):
     return int(refresh_rate * 1000)
 
 @app.callback(
-    Output('tof-hist-min-input', 'value'),
-    Output('tof-hist-max-input', 'value'),
+    Output('tof-hist-range-slider', 'value'),
     Output('tof-bins-slider', 'value'),
     Input('update-tof-histogram', 'n_clicks'),
-    State('tof-hist-min-input', 'value'),
-    State('tof-hist-max-input', 'value'),
+    State('tof-hist-range-slider', 'value'),
     State('tof-bins-slider', 'value')
 )
-def update_tof_histogram_settings(n_clicks, tof_hist_min, tof_hist_max, tof_hist_nbins):
+def update_tof_histogram_settings(n_clicks, tof_hist_range, tof_hist_nbins):
     if n_clicks:
-        viz_tool.update_histogram_bins(tof_hist_min, tof_hist_max, tof_hist_nbins)
-    return tof_hist_min, tof_hist_max, tof_hist_nbins
+        viz_tool.update_histogram_bins(tof_hist_range[0] * 1e-6, tof_hist_range[1] * 1e-6, tof_hist_nbins)
+    return tof_hist_range, tof_hist_nbins
 
 @app.callback(
     [Output('events-over-time', 'figure'),
@@ -573,6 +591,11 @@ def update_plots(n_intervals, clear_clicks, events_roll, update_histogram_clicks
         minus_time_str = datetime.strptime(measurement_name, "%Y_%m_%d_%H_%M_%S").strftime("%Y-%m-%dT%H:%M:%SZ")
         new_data = query_influxdb(minus_time_str, measurement_name)
         viz_tool.update_content(new_data)
+
+        if new_data.empty:
+            viz_tool.historical_event_numbers = np.append(viz_tool.historical_event_numbers, 0)
+            viz_tool.historical_events_times = np.append(viz_tool.historical_events_times, time.time())
+
         try:
             fig_events_over_time = viz_tool.plot_events_over_time(roll=events_roll)
         except Exception as e:
@@ -604,12 +627,17 @@ def update_plots(n_intervals, clear_clicks, events_roll, update_histogram_clicks
         fig_wavenumbers.update_layout(uirevision='wavenumbers')
         fig_voltage.update_layout(uirevision='voltage')
         fig_channel_distribution.update_layout(uirevision='channel_distribution')
-
+        status_color = {"color": "green"} if time.time() - viz_tool.historical_data.query('channel!=-1')['timestamp'].max() < 1 else {"color": "red"}
+        status_text = "Status: Online" if time.time() - viz_tool.historical_data.query('channel!=-1')['timestamp'].max() < 1 else "Status: Offline"
         summary_text = [
-            dbc.Col(f"Number of Total Bunches: {len(viz_tool.historical_data['bunch'].unique())}", width=3),
-            dbc.Col(f"Total Events: {viz_tool.total_events}", width=3),
-            dbc.Col(f"Running Time: {round(viz_tool.historical_data['timestamp'].max() - viz_tool.historical_data['timestamp'].min(), 3)} s", width=3),
-            dbc.Col(f"Time since last event: {round(time.time() - viz_tool.historical_data.query('channel!=-1')['timestamp'].max(), 3)} s", width=3),
+            # Status indicator: green if the last event was less than 1 second ago, red otherwise
+            dbc.Col(status_text, style=status_color, width=2),
+            dbc.Col(f"Bunch Count: {len(viz_tool.historical_data['bunch'].unique())}", width=2),
+            dbc.Col(f"Total Events: {viz_tool.total_events}", width=2),
+            dbc.Col(f"Running Time: {round(viz_tool.historical_data['timestamp'].max() - viz_tool.historical_data['timestamp'].min(), 2)} s", width=3),
+            dbc.Col(f"Time since last event: {round(time.time() - viz_tool.historical_data.query('channel!=-1')['timestamp'].max(), 2)} s", width=3),
+            dbc.Col(f"λ1: {viz_tool.historical_data['wn_1'].iloc[-1].round(12)}", width=2),
+            dbc.Col(f"Voltage: {viz_tool.historical_data['voltage'].iloc[-1]} V", width=2),
         ]
 
         return fig_events_over_time, fig_tof_histogram, fig_wavenumbers, fig_voltage, fig_channel_distribution, summary_text
@@ -619,4 +647,3 @@ def update_plots(n_intervals, clear_clicks, events_roll, update_histogram_clicks
 
 if __name__ == "__main__":
     app.run_server(debug=True)
- 
