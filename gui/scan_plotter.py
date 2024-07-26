@@ -50,6 +50,8 @@ global_tof_min = default_settings['tof_hist_min']
 global_tof_max = default_settings['tof_hist_max']
 
 er_wn_hist_cache = None
+tof_hist_cache = None
+tof_rw_hist_cache = None
 cache_lock = threading.Lock()
 
 class PlotGenerator:
@@ -71,6 +73,7 @@ class PlotGenerator:
         # Rolled all wns and nevents
         self.rolled_all_wns = np.array([])
         self.rolled_all_nevents = np.array([])
+        self.rolled_all_errors = np.array([])
         
         self.first_time = time.time()
         self.last_loaded_time = time.time()
@@ -131,6 +134,10 @@ class PlotGenerator:
             time_window = self.trigger_rate * self.integration_window
             self.rolled_all_wns = np.convolve(self.all_wns_measurements, np.ones(self.rolling_window)/self.rolling_window, mode="valid")
             self.rolled_all_nevents = np.convolve(self.all_nevents_measurements, np.ones(self.rolling_window) / time_window, mode="valid")
+            
+            # Compute errors for the convolution
+            nevents_errors = np.sqrt(self.all_nevents_measurements)
+            self.rolled_all_errors = np.sqrt(np.convolve(nevents_errors**2, np.ones(self.rolling_window) / time_window, mode="valid"))
             
     def _update_historical_data(self, unseen_new_data):
         self.historical_data = pd.concat([self.historical_data, unseen_new_data], ignore_index=True)
@@ -269,6 +276,13 @@ class PlotGenerator:
         fig = px.bar(binned_df, x="wn_mid", y="n_events", template="plotly_white",
                     title="Event Rate vs Wavenumber",
                     labels={"wn_mid": "Wavenumber (cm^-1)", "n_events": "Event Rate"})
+        fig = px.scatter(binned_df, x="wn_mid", y="n_events", template="plotly_white",
+                        title="Event Rate vs Wavenumber",
+                        labels={"wn_mid": "Wavenumber (cm^-1)", "n_events": "Event Rate"})
+        # Add lines between the points
+        fig.update_traces(mode="lines+markers", line=dict(width=2))
+        # Simple polynomial fit
+        
 
         fig.update_layout(
             xaxis_title="Wavenumber (cm^-1)",
@@ -284,7 +298,7 @@ class PlotGenerator:
             return fig
         df_events = self.historical_data.query("channel != -1")
         fig = px.density_heatmap(df_events, x="wn_1", y="time_offset", nbinsx=self.ER_WN_BINS, nbinsy=self.ER_WN_BINS,
-                                    title="Event Rate vs ToF", template="plotly_white", marginal_x="histogram", marginal_y="histogram")
+                                    title="Event Rate vs ToF", template="plotly_white", marginal_x="histogram", marginal_y="violin")
         fig.update_layout(
             xaxis_title="Wavenumber (cm^-1)",
             yaxis_title="Time of Flight (s)",
@@ -304,8 +318,12 @@ class PlotGenerator:
             time_window = self.trigger_rate * self.integration_window
             self.rolled_all_wns = np.convolve(self.all_wns_measurements, np.ones(self.rolling_window)/self.rolling_window, mode="valid")
             self.rolled_all_nevents = np.convolve(self.all_nevents_measurements, np.ones(self.rolling_window) / time_window, mode="valid")
+            
+            # Compute errors for the convolution
+            nevents_errors = np.sqrt(self.all_nevents_measurements)
+            self.rolled_all_errors = np.sqrt(np.convolve(nevents_errors**2, np.ones(self.rolling_window) / time_window, mode="valid"))
         
-        return self.rolled_all_wns, self.rolled_all_nevents
+        return self.rolled_all_wns, self.rolled_all_nevents, self.rolled_all_errors
 
 def query_influxdb(minus_time_str, measurement_name):
     query = f'''
@@ -423,13 +441,14 @@ viz_tool = PlotGenerator()
 first_time = 0
 
 def update_histogram_thread():
-    global er_wn_hist_cache, cache_lock
+    global er_wn_hist_cache, tof_hist_cache, tof_rw_hist_cache, cache_lock
     while True:
         with cache_lock:
             er_wn_hist_cache = viz_tool._compute_er_wn_hist()
+            tof_hist_cache = viz_tool.plot_tof_histogram()
+            tof_rw_hist_cache = viz_tool.plot_3d_tof_rw()
         time.sleep(10)  # Update every 10 seconds
 
-# Start the histogram update thread
 threading.Thread(target=update_histogram_thread, daemon=True).start()
 
 @app.callback(
@@ -497,7 +516,7 @@ def update_tof_histogram_settings(n_clicks, tof_hist_min, tof_hist_max, tof_hist
      State('tof-histogram', 'relayoutData')]
 )
 def update_plots(n_intervals, clear_clicks, events_roll, update_histogram_clicks, events_relayout_data, tof_relayout_data):
-    global viz_tool, global_tof_min, global_tof_max
+    global viz_tool, global_tof_min, global_tof_max, er_wn_hist_cache, tof_hist_cache, tof_rw_hist_cache
     ctx = dash.callback_context
     try:
 
@@ -517,10 +536,11 @@ def update_plots(n_intervals, clear_clicks, events_roll, update_histogram_clicks
         
         viz_tool.update_content(new_data)
         
-        fig_events_over_time = viz_tool.plot_events_over_time(roll=events_roll)
-        fig_tof_histogram = viz_tool.plot_tof_histogram()
-        fig_total_counts_vs_wavenumber = viz_tool.plot_rate_vs_wavenumber_2d_histogram()
-        fig_3d_tof_vs_rw = viz_tool.plot_3d_tof_rw()
+        with cache_lock:
+            fig_events_over_time = viz_tool.plot_events_over_time(roll=events_roll)
+            fig_tof_histogram = tof_hist_cache
+            fig_total_counts_vs_wavenumber = viz_tool.plot_rate_vs_wavenumber_2d_histogram()
+            fig_3d_tof_vs_rw = tof_rw_hist_cache
 
         summary_text = [
             dbc.Col(f"Number of Total Bunches: {len(viz_tool.historical_data['bunch'].unique())}", width=3),
@@ -533,9 +553,6 @@ def update_plots(n_intervals, clear_clicks, events_roll, update_histogram_clicks
     
     except Exception as e:
         print(f"Error updating plots: {e}")
-        
-        # return go.Figure(), go.Figure(), go.Figure(), go.Figure(), [dbc.Col("No data available.", width=12)]
-        # Display in each plot a plotly loading message
         loading_icon = go.Scatter(x=[0], y=[0], mode="text", text=["Loading..."], textfont_size=24, textposition="middle center")
         return go.Figure(data=loading_icon), go.Figure(data=loading_icon), go.Figure(data=loading_icon), go.Figure(data=loading_icon), [dbc.Col("No data available.", width=12)]
 

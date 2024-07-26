@@ -466,19 +466,6 @@ app.layout = dbc.Container([
         id="wavenumbers-settings-modal",
         is_open=False,
     ),
-    dbc.Modal(
-        [
-            dbc.ModalHeader("Voltage Settings"),
-            dbc.ModalBody([
-                dbc.Label("Voltage Plot Settings (Not customizable in this example)"),
-            ]),
-            dbc.ModalFooter([
-                dbc.Button("Close", id="close-voltage-modal", className="ml-auto")
-            ])
-        ],
-        id="voltage-settings-modal",
-        is_open=False,
-    ),
 ], fluid=True)
 
 viz_tool = PlotGenerator()
@@ -503,22 +490,11 @@ def toggle_tof_settings(n1, n2, is_open):
     if n1 or n2:
         return not is_open
     return is_open
-
-@app.callback(
-    Output("wavenumbers-settings-modal", "is_open"),
-    [Input("wavenumbers-settings-button", "n_clicks"), Input("close-wavenumbers-modal", "n_clicks")],
-    [State("wavenumbers-settings-modal", "is_open")]
-)
 def toggle_wavenumbers_settings(n1, n2, is_open):
     if n1 or n2:
         return not is_open
     return is_open
 
-@app.callback(
-    Output("voltage-settings-modal", "is_open"),
-    [Input("voltage-settings-button", "n_clicks"), Input("close-voltage-modal", "n_clicks")],
-    [State("voltage-settings-modal", "is_open")]
-)
 def toggle_voltage_settings(n1, n2, is_open):
     if n1 or n2:
         return not is_open
@@ -640,7 +616,8 @@ def update_plots(n_intervals, clear_clicks, events_roll, update_histogram_clicks
         return fig_events_over_time, fig_tof_histogram, fig_wavenumbers, fig_voltage, fig_channel_distribution, summary_text
     except Exception as e:
         print(f"Error updating plots: {e}")
-        return go.Figure(), go.Figure(), go.Figure(), go.Figure(), go.Figure(), [dbc.Col("No data available.", width=12)]
+        loading_icon = go.Scatter(x=[0], y=[0], mode="text", text=["Loading..."], textfont_size=24, textposition="middle center")
+        return go.Figure(data=loading_icon), go.Figure(data=loading_icon), go.Figure(data=loading_icon), go.Figure(data=loading_icon), [dbc.Col("No data available.", width=12)]
 
 if __name__ == "__main__":
     app.run_server(debug=True)
