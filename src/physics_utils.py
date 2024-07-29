@@ -1,5 +1,5 @@
 import pandas as pd
-
+import numpy as np
 
 def convert_to_stoptime(t):
     # 30000 -> ~15 us
@@ -19,16 +19,15 @@ def flops_to_time(ft):
 
 def compute_tof_from_data(data: pd.DataFrame):
     latest_trigger_time = 0
-    output_data = {"tof": [], "timestamp": []}
+    tofs = []
     for index, d in data.iterrows():
         is_trigger = d.channels == -1
         if is_trigger:
             latest_trigger_time = d.timestamp
         else:
             tof = d["timestamp"] - latest_trigger_time
-            output_data["tof"].append(tof)
-            output_data["timestamp"].append(d["timestamp"])
-    return pd.DataFrame(output_data)
+            tofs.append(flops_to_time(tof))
+    return np.array(tofs)
 
 
 def event_rate_per_wavelength(data: pd.DataFrame, wavelength_binning=10):
