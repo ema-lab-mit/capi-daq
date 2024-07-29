@@ -27,16 +27,18 @@ SETTINGS_PATH = "C:\\Users\\EMALAB\\Desktop\\TW_DAQ\\fast_tagger_gui\\settings.j
 INFLUXDB_TOKEN = db_token
 INFLUXDB_ORG = "EMAMIT"
 INFLUXDB_BUCKET = "DAQ"
+
+# Default settings
 NBATCH = 1_000
 TOTAL_MAX_POINTS = int(50_000)
 MAX_POINTS_FOR_PLOT = 500
-
 default_settings = {
     "tof_hist_nbins": 100,
     "tof_hist_min": 1e-6,
     "tof_hist_max": 20e-6,
     "rolling_window": 100,
 }
+REFRESH_RATE = 0.2  # in seconds
 
 client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
 query_api = client.query_api()
@@ -51,13 +53,12 @@ class PlotGenerator:
         self.tof_hist_min = settings_dict.get("tof_hist_min", 0)
         self.tof_hist_max = settings_dict.get("tof_hist_max", 20e-6)
         self.rolling_window = settings_dict.get("rolling_window", 100)
-        
         self._historic_timeseries_columns = ["bunch", "timestamp", "n_events", "channel", "wn_1", "wn_2", "wn_3", "wn_4", "voltage"]
         self.last_loaded_time = time.time()
         self.historical_data = pd.DataFrame(columns=self._historic_timeseries_columns)
         self.historical_event_numbers = np.array([])
-        self.historical_events_times = np.array([])
-        self.historical_trigger_numbers = np.array([])
+        self.historical_rates_ns = np.array([])
+        self.historical_rates_ts = np.array([])
         self.first_time = time.time()
         
         self.total_events = 0
@@ -93,23 +94,35 @@ class PlotGenerator:
             self.tof_var = np.average((self.tof_histogram_bins[:-1] - self.tof_mean)**2, weights=self.histogram_counts)
         
     def _update_historical_data(self, unseen_new_data):
+        
+        events_bunch_data = unseen_new_data.drop_duplicates("bunch")
+        # Number of events per bunch
+        proc_events_time = events_bunch_data.n_events # events/bunch
+        # Times of each bunch
+        self.bunch_times = events_bunch_data.timestamp
         self.historical_event_numbers = np.append(self.historical_event_numbers, unseen_new_data.query("channel !=-1")["n_events"].values)
         self.historical_events_times = np.append(self.historical_events_times, unseen_new_data.query("channel !=-1")["timestamp"].values)
-        rolled_new_data = unseen_new_data[self._historic_timeseries_columns].rolling(window=self.rolling_window).mean()
+        # Update the rates
+        erate = proc_events_time * self.trigger_rate # events/s
+        erate_convolved = np.convolve(erate, np.ones(self.rolling_window), mode="valid") # events/window size
+        self.integration_time = 1/ (self.rolling_window * self.rolling_window) # s
+        self.historical_rates_ns = np.append(self.historical_rates_ns, erate_convolved)
+        unseen_it, unseen_ft = self.bunch_times.iloc[0], self.bunch_times.iloc[-1]
+        self.historical_rates_ts = np.append(self.historical_rates_ts, np.linspace(unseen_it, unseen_ft, len(erate_convolved)))
+        # rolled_new_data = unseen_new_data[self._historic_timeseries_columns].rolling(window=self.rolling_window).mean()
         self.historical_data = pd.concat([self.historical_data, rolled_new_data], ignore_index=True)
         
     def update_content(self, new_data):
         unseen_new_data = new_data[new_data['timestamp'] > self.last_loaded_time]
         self.last_loaded_time = new_data['timestamp'].max()
         self.unseen_new_data = unseen_new_data
-        if unseen_new_data.query("channel!=0").empty:
+        self._update_historical_data(unseen_new_data)
+        # If there are no new events, just append a 0 to the historical data
+        if unseen_new_data.query("channel<0").empty:
             self.historical_event_numbers = np.append(self.historical_event_numbers, 0)
             self.historical_events_times = np.append(self.historical_events_times, time.time())
         else:
             self._update_tof_statistics(unseen_new_data)
-            self._update_historical_data(unseen_new_data)
-        if self.historical_data.shape[0] > TOTAL_MAX_POINTS:
-            self.historical_data = self.historical_data.tail(TOTAL_MAX_POINTS)
         self.historical_data = pd.concat([self.historical_data, unseen_new_data], ignore_index=True)
 
     def get_trigger_rate(self):
@@ -141,20 +154,15 @@ class PlotGenerator:
 
     def plot_events_over_time(self, max_points=MAX_POINTS_FOR_PLOT, roll=10):
         fig = go.Figure()
-        if self.historical_event_numbers.size == 0:
-            return fig
         events = self.historical_event_numbers
         times = self.historical_events_times
         delta_ts = times - self.first_time
+        # DO NOT TRY TO PLOT IF THERE ARE TOO MANY
         if len(delta_ts) > max_points:
             events = events[-max_points:]
             delta_ts = delta_ts[-max_points:]
 
-        if len(events) < roll:
-            rolled_with_numpy = np.zeros(len(events))
-        else:
-            rolled_with_numpy = np.convolve(events, np.ones(roll)/roll, mode="valid")
-
+        rolled_with_numpy = np.convolve(events, np.ones(roll)/roll, mode="valid")
         fig.add_trace(go.Scatter(x=delta_ts[roll-1:], y=rolled_with_numpy, mode="lines", name=f"Integrated {roll} B", line=dict(color="red")))
         
         # Generate the Bollinger Bands
@@ -390,12 +398,28 @@ app.layout = dbc.Container([
             dcc.Graph(id='channel-distribution', style={'height': '300px'})
         ], width=4),
     ]),
-    dcc.Interval(id='interval-component', interval=0.3*1000, n_intervals=0),
+    dcc.Interval(id='interval-component', interval=REFRESH_RATE*1000, n_intervals=0),
     dbc.Offcanvas(
         [
             dbc.Row([
                 dbc.Col(html.Div("Refresh Rate (seconds): ")),
-                dbc.Col(dcc.Slider(id='refresh-rate', min=0.2, max=10.0, step=0.5, value=0.5, tooltip={"placement": "bottom", "always_visible": True}, marks={i: str(i) for i in np.arange(0.5, 11, 0.5)})),
+                dbc.Col(dcc.Slider(id='refresh-rate', min=0.2, max=10.0, step=0.1, value=REFRESH_RATE, tooltip={"placement": "bottom", "always_visible": True}, marks={i: str(i) for i in np.arange(0.5, 11, 0.5)})),
+            ], style={'padding': '20px'}),
+            dbc.Row([
+                dbc.Col(html.Div("Batch Size (NBATCH): ")),
+                dbc.Col(dcc.Input(id='nbatch-input', type='number', value=NBATCH, step=100)),
+            ], style={'padding': '20px'}),
+            dbc.Row([
+                dbc.Col(html.Div("Total Max Points: ")),
+                dbc.Col(dcc.Input(id='total-max-points-input', type='number', value=TOTAL_MAX_POINTS, step=1000)),
+            ], style={'padding': '20px'}),
+            dbc.Row([
+                dbc.Col(html.Div("Max Points for Plot: ")),
+                dbc.Col(dcc.Input(id='max-points-for-plot-input', type='number', value=MAX_POINTS_FOR_PLOT, step=100)),
+            ], style={'padding': '20px'}),
+            dbc.Row([
+                dbc.Col(html.Div("Rolling Window: ")),
+                dbc.Col(dcc.Input(id='rolling-window-input', type='number', value=default_settings['rolling_window'], step=10)),
             ], style={'padding': '20px'}),
         ],
         id="offcanvas", 
@@ -490,12 +514,13 @@ def toggle_tof_settings(n1, n2, is_open):
     if n1 or n2:
         return not is_open
     return is_open
-def toggle_wavenumbers_settings(n1, n2, is_open):
-    if n1 or n2:
-        return not is_open
-    return is_open
 
-def toggle_voltage_settings(n1, n2, is_open):
+@app.callback(
+    Output("wavenumbers-settings-modal", "is_open"),
+    [Input("wavenumbers-settings-button", "n_clicks"), Input("close-wavenumbers-modal", "n_clicks")],
+    [State("wavenumbers-settings-modal", "is_open")]
+)
+def toggle_wavenumbers_settings(n1, n2, is_open):
     if n1 or n2:
         return not is_open
     return is_open
@@ -515,7 +540,27 @@ def toggle_offcanvas(n1, is_open):
     Input('refresh-rate', 'value')
 )
 def update_refresh_rate(refresh_rate):
+    global REFRESH_RATE
+    REFRESH_RATE = refresh_rate
     return int(refresh_rate * 1000)
+
+@app.callback(
+    [Output('nbatch-input', 'value'),
+     Output('total-max-points-input', 'value'),
+     Output('max-points-for-plot-input', 'value'),
+     Output('rolling-window-input', 'value')],
+    [Input('nbatch-input', 'value'),
+     Input('total-max-points-input', 'value'),
+     Input('max-points-for-plot-input', 'value'),
+     Input('rolling-window-input', 'value')]
+)
+def update_settings(nbatch, total_max_points, max_points_for_plot, rolling_window):
+    global NBATCH, TOTAL_MAX_POINTS, MAX_POINTS_FOR_PLOT, default_settings
+    NBATCH = nbatch
+    TOTAL_MAX_POINTS = total_max_points
+    MAX_POINTS_FOR_PLOT = max_points_for_plot
+    default_settings['rolling_window'] = rolling_window
+    return nbatch, total_max_points, max_points_for_plot, rolling_window
 
 @app.callback(
     Output('tof-hist-range-slider', 'value'),
