@@ -27,16 +27,19 @@ SETTINGS_PATH = "C:\\Users\\EMALAB\\Desktop\\TW_DAQ\\fast_tagger_gui\\settings.j
 INFLUXDB_TOKEN = db_token
 INFLUXDB_ORG = "EMAMIT"
 INFLUXDB_BUCKET = "DAQ"
+
+# Default settings
 NBATCH = 1_000
 TOTAL_MAX_POINTS = int(50_000)
-MAX_POINTS_FOR_PLOT = 500
-
+MAX_POINTS_FOR_PLOT = 100
 default_settings = {
     "tof_hist_nbins": 100,
     "tof_hist_min": 1e-6,
     "tof_hist_max": 20e-6,
-    "rolling_window": 100,
+    "plot_rolling_window": 10,
+    "integration_window": 10,
 }
+REFRESH_RATE = 0.2  # in seconds
 
 client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
 query_api = client.query_api()
@@ -50,14 +53,14 @@ class PlotGenerator:
         self.tof_hist_nbins = settings_dict.get("tof_hist_nbins", 100)
         self.tof_hist_min = settings_dict.get("tof_hist_min", 0)
         self.tof_hist_max = settings_dict.get("tof_hist_max", 20e-6)
-        self.rolling_window = settings_dict.get("rolling_window", 100)
-        
+        self.plot_rolling_window = settings_dict.get("plot_rolling_window", 100)
+        self.integration_window = settings_dict.get("integration_window", 10)
         self._historic_timeseries_columns = ["bunch", "timestamp", "n_events", "channel", "wn_1", "wn_2", "wn_3", "wn_4", "voltage"]
         self.last_loaded_time = time.time()
         self.historical_data = pd.DataFrame(columns=self._historic_timeseries_columns)
         self.historical_event_numbers = np.array([])
-        self.historical_events_times = np.array([])
-        self.historical_trigger_numbers = np.array([])
+        self.historical_rates_ns = np.array([])
+        self.historical_rates_ts = np.array([])
         self.first_time = time.time()
         
         self.total_events = 0
@@ -71,6 +74,7 @@ class PlotGenerator:
         self.prev_tof_hist_min = self.tof_hist_min
         self.prev_tof_hist_max = self.tof_hist_max
         self.prev_tof_hist_nbins = self.tof_hist_nbins
+        self.trigger_rate = 1
 
     def update_histogram_bins(self, tof_hist_min, tof_hist_max, tof_hist_nbins):
         self.tof_hist_min = tof_hist_min
@@ -83,7 +87,7 @@ class PlotGenerator:
         if len(unseen_new_data) == 0:
             return
         events_data = unseen_new_data.query("channel != -1")
-        events_data = events_data[(events_data['time_offset'] >= global_tof_min) & (events_data['time_offset'] <= global_tof_max)]
+        events_data = events_data[((events_data['time_offset'] >= global_tof_min) & (events_data['time_offset'] <= global_tof_max)) | (events_data['channel'] == -1)]
         self.total_events += len(events_data)
         events_offset = events_data["time_offset"].values
         if len(events_data) > 0:
@@ -93,32 +97,36 @@ class PlotGenerator:
             self.tof_var = np.average((self.tof_histogram_bins[:-1] - self.tof_mean)**2, weights=self.histogram_counts)
         
     def _update_historical_data(self, unseen_new_data):
+        events_bunch_data = unseen_new_data.query("channel!=-1").drop_duplicates("bunch")
+        if events_bunch_data.empty:
+            proc_events_time = 0
+            bunch_times = time.time()
+        else:
+            proc_events_time = events_bunch_data.n_events # events/bunch
+            bunch_times = events_bunch_data.timestamp
         self.historical_event_numbers = np.append(self.historical_event_numbers, unseen_new_data.query("channel !=-1")["n_events"].values)
-        self.historical_events_times = np.append(self.historical_events_times, unseen_new_data.query("channel !=-1")["timestamp"].values)
-        rolled_new_data = unseen_new_data[self._historic_timeseries_columns].rolling(window=self.rolling_window).mean()
-        self.historical_data = pd.concat([self.historical_data, rolled_new_data], ignore_index=True)
+        self.historical_rates_ns = np.append(self.historical_rates_ns, proc_events_time) # Average number of events per second
+        self.historical_rates_ts = np.append(self.historical_rates_ts, bunch_times)
         
     def update_content(self, new_data):
         unseen_new_data = new_data[new_data['timestamp'] > self.last_loaded_time]
+        # Filter within the time of flight range
+        unseen_new_data = unseen_new_data[((unseen_new_data['time_offset'] >= global_tof_min) & (unseen_new_data['time_offset'] <= global_tof_max)) | (unseen_new_data['channel'] == -1)]
+
         self.last_loaded_time = new_data['timestamp'].max()
         self.unseen_new_data = unseen_new_data
-        if unseen_new_data.query("channel!=0").empty:
-            self.historical_event_numbers = np.append(self.historical_event_numbers, 0)
-            self.historical_events_times = np.append(self.historical_events_times, time.time())
-        else:
-            self._update_tof_statistics(unseen_new_data)
-            self._update_historical_data(unseen_new_data)
-        if self.historical_data.shape[0] > TOTAL_MAX_POINTS:
-            self.historical_data = self.historical_data.tail(TOTAL_MAX_POINTS)
+        self.get_trigger_rate()
+        self.integration_time = 1 / (self.integration_window * self.trigger_rate)
+        self._update_historical_data(unseen_new_data)
+        self._update_tof_statistics(unseen_new_data)
         self.historical_data = pd.concat([self.historical_data, unseen_new_data], ignore_index=True)
 
     def get_trigger_rate(self):
         if self.unseen_new_data.empty:
-            return 0
+            return 1
         number_bunches = self.unseen_new_data['bunch'].max() - self.unseen_new_data['bunch'].min() + 1
         time_diff = self.unseen_new_data['timestamp'].max() - self.unseen_new_data['timestamp'].min()
         self.trigger_rate = number_bunches / time_diff
-        print(self.trigger_rate)
         return self.trigger_rate
     
     def estimate_rates(self, unseen_new_data: pd.DataFrame) -> pd.Series:
@@ -133,59 +141,44 @@ class PlotGenerator:
                 event_numbers = len(filtered_new_data)
                 rate = event_numbers / delta_t
             else:
-                rate = self.get_trigger_rate()
+                rate = self.trigger_rate
             rates[channel_id] = rate
         series = pd.Series(rates).sort_values(ascending=False)
         self.last_rates = series
         return series
 
-    def plot_events_over_time(self, max_points=MAX_POINTS_FOR_PLOT, roll=10):
+    def plot_events_over_time(self, max_points=MAX_POINTS_FOR_PLOT):
         fig = go.Figure()
-        if self.historical_event_numbers.size == 0:
-            return fig
-        events = self.historical_event_numbers
-        times = self.historical_events_times
-        delta_ts = times - self.first_time
+        delta_ts = self.historical_rates_ts - self.first_time
+        events = self.historical_rates_ns
+        # DO NOT TRY TO PLOT IF THERE ARE TOO MANY
         if len(delta_ts) > max_points:
             events = events[-max_points:]
             delta_ts = delta_ts[-max_points:]
-
-        if len(events) < roll:
-            rolled_with_numpy = np.zeros(len(events))
-        else:
-            rolled_with_numpy = np.convolve(events, np.ones(roll)/roll, mode="valid")
-
-        fig.add_trace(go.Scatter(x=delta_ts[roll-1:], y=rolled_with_numpy, mode="lines", name=f"Integrated {roll} B", line=dict(color="red")))
-        
-        # Generate the Bollinger Bands
-        if len(rolled_with_numpy) > 0:
-            upper_band = rolled_with_numpy + 2 * np.std(rolled_with_numpy)
-            lower_band = rolled_with_numpy - 2 * np.std(rolled_with_numpy)
-        else:
-            upper_band = np.zeros(len(delta_ts[roll-1:]))
-            lower_band = np.zeros(len(delta_ts[roll-1:]))
-
-        fig.add_trace(go.Scatter(x=delta_ts[roll-1:], y=upper_band, mode="lines", name="Upper Band", line=dict(color="green", dash="dash")))
-        fig.add_trace(go.Scatter(x=delta_ts[roll-1:], y=lower_band, mode="lines", name="Lower Band", line=dict(color="green", dash="dash")))
-
-        # Fill between the Bollinger Bands
-        fig.add_trace(go.Scatter(
-            x=np.concatenate([delta_ts[roll-1:], delta_ts[roll-1:][::-1]]),
-            y=np.concatenate([upper_band, lower_band[::-1]]),
-            fill='toself',
-            fillcolor='rgba(0, 255, 0, 0.2)',
-            line=dict(color='rgba(255,255,255,0)'),
-            showlegend=False,
-            name='Bollinger Bands'
-        ))
+        fig.add_trace(go.Scatter(x=delta_ts, y=events, mode="markers", name="Number of events", line=dict(color="rgba(135, 206, 250, 0.5)", dash="dash")))
+        rolled_events = np.convolve(events, np.ones(self.plot_rolling_window), mode="valid") / self.plot_rolling_window
+        rolled_ts = np.linspace(delta_ts[0], delta_ts[-1], len(rolled_events))
+        fig.add_trace(go.Scatter(x=rolled_ts, y=rolled_events, mode="lines", name=f"Averaged {self.plot_rolling_window} Bunches", line=dict(color="blue")))
 
         fig.update_layout(
             xaxis_title="Monitoring Time (s)",
-            yaxis_title="Total Counts (s)",
+            yaxis_title="Total Counts/Bunch",
             yaxis=dict(range=[0, None]),
             legend=dict(title="Displaying"),
             template="plotly_white",
-            uirevision='events_over_time'  # Preserve UI state
+            uirevision='events_over_time',  # Preserve UI state
+        )
+        # Put the leggend on the top left corner (inside the plot)
+        fig.update_layout(
+            legend=dict(
+                yanchor="top",
+                y=0.99,
+                xanchor="left",
+                x=0.01,
+                bgcolor="rgba(255, 255, 255, 0.5)",
+                bordercolor="Black",
+                borderwidth=1
+            )
         )
         return fig
 
@@ -216,6 +209,7 @@ class PlotGenerator:
             xaxis_title="Time of Flight (µs)",
             yaxis_title="Probability Density",
             uirevision='tof_histogram',  # Preserve UI state
+            template="plotly_white",
             legend=dict(
                 yanchor="top",
                 y=0.99,
@@ -228,7 +222,7 @@ class PlotGenerator:
         )
         return fig
 
-    def plot_wavenumbers(self, new_data, selected_channels=[1, 2, 3, 4], max_points=10_000):
+    def plot_wavenumbers(self, new_data, selected_channels=[1, 2, 3, 4], max_points=200):
         fig = go.Figure()
         if self.historical_data.empty:
             return fig
@@ -246,6 +240,7 @@ class PlotGenerator:
             xaxis_title="Monitoring Time (s)",
             yaxis_title="Wavenumber",
             uirevision='wavenumbers',  # Preserve UI state
+            template="plotly_white",
             legend=dict(
                 x=0.01,  # Position legend inside the plot
                 y=0.99,
@@ -262,22 +257,21 @@ class PlotGenerator:
         )
         return fig
 
-
-    def plot_voltage(self, max_points=10_000):
+    def plot_voltage(self, max_points=500):
         fig = go.Figure()
         if self.historical_data.empty:
             return fig
         delta_ts = self.historical_data["timestamp"] - self.first_time
         if "voltage" in self.historical_data.columns and self.historical_data["voltage"].mean() > 0:
             last_data = self.historical_data["voltage"].iloc[-1]
-            decimation_factor = (len(delta_ts) // max_points) if len(delta_ts) > max_points else 1
-            decimated_ts = delta_ts[::decimation_factor]
-            decimated_data = self.historical_data["voltage"][::decimation_factor]
+            decimated_data = self.historical_data["voltage"].tail(max_points)
+            decimated_ts = delta_ts.tail(max_points)
             fig.add_trace(go.Scatter(x=decimated_ts, y=decimated_data, mode="lines", name=f"Voltage = {round(last_data, 12)}", line=dict(color="orange")))
 
         fig.update_layout(
             xaxis_title="Monitoring Time (s)",
             yaxis_title="Voltage",
+            template="plotly_white",
             uirevision='voltage'  # Preserve UI state
         )
         return fig
@@ -327,7 +321,7 @@ def query_influxdb(minus_time_str, measurement_name):
         for table in result:
             for record in table.records:
                 records.append(record.values)
-        df = pd.DataFrame(records).tail(NBATCH).dropna()
+        df = pd.DataFrame(records).dropna()
         df = df.rename(columns={'_time': 'time'})
         df['time'] = pd.to_datetime(df['time'])
         column_order = ['time', 'bunch', 'n_events', 'channel', 'time_offset', 'timestamp', 'wn_1', 'wn_2', 'wn_3', 'wn_4', 'voltage']
@@ -390,12 +384,32 @@ app.layout = dbc.Container([
             dcc.Graph(id='channel-distribution', style={'height': '300px'})
         ], width=4),
     ]),
-    dcc.Interval(id='interval-component', interval=0.3*1000, n_intervals=0),
+    dcc.Interval(id='interval-component', interval=REFRESH_RATE*1000, n_intervals=0),
     dbc.Offcanvas(
         [
             dbc.Row([
                 dbc.Col(html.Div("Refresh Rate (seconds): ")),
-                dbc.Col(dcc.Slider(id='refresh-rate', min=0.2, max=10.0, step=0.5, value=0.5, tooltip={"placement": "bottom", "always_visible": True}, marks={i: str(i) for i in np.arange(0.5, 11, 0.5)})),
+                dbc.Col(dcc.Slider(id='refresh-rate', min=0.2, max=10.0, step=0.1, value=REFRESH_RATE, tooltip={"placement": "bottom", "always_visible": True}, marks={i: str(i) for i in np.arange(0.2, 1, 0.01)})),
+            ], style={'padding': '20px'}),
+            dbc.Row([
+                dbc.Col(html.Div("Batch Size (NBATCH): ")),
+                dbc.Col(dcc.Input(id='nbatch-input', type='number', value=NBATCH, step=100)),
+            ], style={'padding': '20px'}),
+            dbc.Row([
+                dbc.Col(html.Div("Total Max Points: ")),
+                dbc.Col(dcc.Input(id='total-max-points-input', type='number', value=TOTAL_MAX_POINTS, step=1000)),
+            ], style={'padding': '20px'}),
+            dbc.Row([
+                dbc.Col(html.Div("Max Points for Plot: ")),
+                dbc.Col(dcc.Input(id='max-points-for-plot-input', type='number', value=MAX_POINTS_FOR_PLOT, step=100)),
+            ], style={'padding': '20px'}),
+            dbc.Row([
+                dbc.Col(html.Div("Plot Rolling Window: ")),
+                dbc.Col(dcc.Input(id='plot-rolling-window-input', type='number', value=default_settings['plot_rolling_window'], step=10)),
+            ], style={'padding': '20px'}),
+            dbc.Row([
+                dbc.Col(html.Div("Integration Window: ")),
+                dbc.Col(dcc.Input(id='integration-window-input', type='number', value=default_settings['integration_window'], step=1)),
             ], style={'padding': '20px'}),
         ],
         id="offcanvas", 
@@ -406,8 +420,8 @@ app.layout = dbc.Container([
         [
             dbc.ModalHeader("Events Over Time Settings"),
             dbc.ModalBody([
-                dbc.Label(r"Integration Window = "),
-                dcc.Input(id='events-roll-input', type='number', value=10),
+                dbc.Label("Plot Rolling Window:"),
+                dcc.Input(id='events-roll-input', type='number', value=default_settings['plot_rolling_window']),
             ]),
             dbc.ModalFooter([
                 dbc.Button("Close", id="close-events-modal", className="ml-auto")
@@ -490,12 +504,13 @@ def toggle_tof_settings(n1, n2, is_open):
     if n1 or n2:
         return not is_open
     return is_open
-def toggle_wavenumbers_settings(n1, n2, is_open):
-    if n1 or n2:
-        return not is_open
-    return is_open
 
-def toggle_voltage_settings(n1, n2, is_open):
+@app.callback(
+    Output("wavenumbers-settings-modal", "is_open"),
+    [Input("wavenumbers-settings-button", "n_clicks"), Input("close-wavenumbers-modal", "n_clicks")],
+    [State("wavenumbers-settings-modal", "is_open")]
+)
+def toggle_wavenumbers_settings(n1, n2, is_open):
     if n1 or n2:
         return not is_open
     return is_open
@@ -515,7 +530,32 @@ def toggle_offcanvas(n1, is_open):
     Input('refresh-rate', 'value')
 )
 def update_refresh_rate(refresh_rate):
+    global REFRESH_RATE
+    REFRESH_RATE = refresh_rate
     return int(refresh_rate * 1000)
+
+@app.callback(
+    [Output('nbatch-input', 'value'),
+     Output('total-max-points-input', 'value'),
+     Output('max-points-for-plot-input', 'value'),
+     Output('plot-rolling-window-input', 'value'),
+     Output('integration-window-input', 'value')],
+    [Input('nbatch-input', 'value'),
+     Input('total-max-points-input', 'value'),
+     Input('max-points-for-plot-input', 'value'),
+     Input('plot-rolling-window-input', 'value'),
+     Input('integration-window-input', 'value')]
+)
+def update_settings(nbatch, total_max_points, max_points_for_plot, plot_rolling_window, integration_window):
+    global NBATCH, TOTAL_MAX_POINTS, MAX_POINTS_FOR_PLOT, default_settings
+    NBATCH = nbatch
+    TOTAL_MAX_POINTS = total_max_points
+    MAX_POINTS_FOR_PLOT = max_points_for_plot
+    default_settings['plot_rolling_window'] = plot_rolling_window
+    default_settings['integration_window'] = integration_window
+    viz_tool.plot_rolling_window = plot_rolling_window
+    viz_tool.integration_window = integration_window
+    return nbatch, total_max_points, max_points_for_plot, plot_rolling_window, integration_window
 
 @app.callback(
     Output('tof-hist-range-slider', 'value'),
@@ -525,8 +565,11 @@ def update_refresh_rate(refresh_rate):
     State('tof-bins-slider', 'value')
 )
 def update_tof_histogram_settings(n_clicks, tof_hist_range, tof_hist_nbins):
+    global global_tof_min, global_tof_max
     if n_clicks:
-        viz_tool.update_histogram_bins(tof_hist_range[0] * 1e-6, tof_hist_range[1] * 1e-6, tof_hist_nbins)
+        global_tof_min = tof_hist_range[0] * 1e-6
+        global_tof_max = tof_hist_range[1] * 1e-6
+        viz_tool.update_histogram_bins(global_tof_min, global_tof_max, tof_hist_nbins)
     return tof_hist_range, tof_hist_nbins
 
 @app.callback(
@@ -545,7 +588,7 @@ def update_tof_histogram_settings(n_clicks, tof_hist_range, tof_hist_nbins):
      State('tof-histogram', 'relayoutData'),
      State('wavenumbers', 'relayoutData')]
 )
-def update_plots(n_intervals, clear_clicks, events_roll, update_histogram_clicks, wavenumbers_channels, events_relayout_data, tof_relayout_data, wavenumbers_relayout_data):
+def update_plots(n_intervals, clear_clicks, plot_rolling_window, update_histogram_clicks, wavenumbers_channels, events_relayout_data, tof_relayout_data, wavenumbers_relayout_data):
     try:
         global viz_tool, global_tof_min, global_tof_max
         ctx = dash.callback_context
@@ -567,10 +610,8 @@ def update_plots(n_intervals, clear_clicks, events_roll, update_histogram_clicks
 
         if new_data.empty:
             viz_tool.historical_event_numbers = np.append(viz_tool.historical_event_numbers, 0)
-            viz_tool.historical_events_times = np.append(viz_tool.historical_events_times, time.time())
-
         try:
-            fig_events_over_time = viz_tool.plot_events_over_time(roll=events_roll)
+            fig_events_over_time = viz_tool.plot_events_over_time()
         except Exception as e:
             print(f"Error updating events over time: {e}")
             fig_events_over_time = go.Figure()
@@ -600,8 +641,8 @@ def update_plots(n_intervals, clear_clicks, events_roll, update_histogram_clicks
         fig_wavenumbers.update_layout(uirevision='wavenumbers')
         fig_voltage.update_layout(uirevision='voltage')
         fig_channel_distribution.update_layout(uirevision='channel_distribution')
-        status_color = {"color": "green"} if time.time() - viz_tool.historical_data.query('channel!=-1')['timestamp'].max() < 1 else {"color": "red"}
-        status_text = "Status: Online" if time.time() - viz_tool.historical_data.query('channel!=-1')['timestamp'].max() < 1 else "Status: Offline"
+        status_color = {"color": "green"} if time.time() - viz_tool.historical_data.query('channel!=-1')['timestamp'].max() < 2 else {"color": "red"}
+        status_text = "Status: Online" if time.time() - viz_tool.historical_data.query('channel!=-1')['timestamp'].max() < 2 else "Status: Offline"
         summary_text = [
             # Status indicator: green if the last event was less than 1 second ago, red otherwise
             dbc.Col(status_text, style=status_color, width=2),
@@ -611,6 +652,7 @@ def update_plots(n_intervals, clear_clicks, events_roll, update_histogram_clicks
             dbc.Col(f"Time since last event: {round(time.time() - viz_tool.historical_data.query('channel!=-1')['timestamp'].max(), 2)} s", width=3),
             dbc.Col(f"λ1: {viz_tool.historical_data['wn_1'].iloc[-1].round(12)}", width=2),
             dbc.Col(f"Voltage: {viz_tool.historical_data['voltage'].iloc[-1]} V", width=2),
+            dbc.Col(f"Trigger Rate: {viz_tool.trigger_rate:.2f} Hz", width=2),
         ]
 
         return fig_events_over_time, fig_tof_histogram, fig_wavenumbers, fig_voltage, fig_channel_distribution, summary_text

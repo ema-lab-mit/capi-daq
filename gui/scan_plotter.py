@@ -124,6 +124,16 @@ class PlotGenerator:
         self.trigger_rate = number_bunches / time_diff
         return self.trigger_rate
     
+    def compute_counts_time(self, integration_time=0.5):
+        # How many triggers as a function of time
+        ntrigs = self.trigger_rate * integration_time # trigs/s
+        # How many events per trigger
+        number_events_per_trigger = self.proc_events_time / len(self.historical_data)
+        # Total counts in the integration time
+        total_counts = ntrigs * number_events_per_trigger
+        return total_counts # counts/s
+        
+    
     def _update_wavenumber_statistics(self):
         er_wn_dataframe = self.unseen_new_data.query("channel != -1").drop_duplicates(subset=["bunch"])[[f"wn_{self.wn_channel_selected}", "n_events"]]
         if er_wn_dataframe.empty or len(er_wn_dataframe) == 0:
@@ -541,13 +551,18 @@ def update_plots(n_intervals, clear_clicks, events_roll, update_histogram_clicks
             fig_tof_histogram = tof_hist_cache
             fig_total_counts_vs_wavenumber = viz_tool.plot_rate_vs_wavenumber_2d_histogram()
             fig_3d_tof_vs_rw = tof_rw_hist_cache
-
-        summary_text = [
-            dbc.Col(f"Number of Total Bunches: {len(viz_tool.historical_data['bunch'].unique())}", width=3),
-            dbc.Col(f"Total Events: {viz_tool.total_events}", width=3),
-            dbc.Col(f"Running Time: {round(viz_tool.historical_data['timestamp'].max() - viz_tool.historical_data['timestamp'].min(), 3)} s", width=3),
-            dbc.Col(f"Time since last event: {round(time.time() - viz_tool.historical_data.query('channel!=-1')['timestamp'].max(), 3)} s", width=3),
-        ]
+            status_color = {"color": "green"} if time.time() - viz_tool.historical_data.query('channel!=-1')['timestamp'].max() < 1 else {"color": "red"}
+            status_text = "Status: Online" if time.time() - viz_tool.historical_data.query('channel!=-1')['timestamp'].max() < 1 else "Status: Offline"
+            summary_text = [
+                # Status indicator: green if the last event was less than 1 second ago, red otherwise
+                dbc.Col(status_text, style=status_color, width=2),
+                dbc.Col(f"Bunch Count: {len(viz_tool.historical_data['bunch'].unique())}", width=2),
+                dbc.Col(f"Total Events: {viz_tool.total_events}", width=2),
+                dbc.Col(f"Running Time: {round(viz_tool.historical_data['timestamp'].max() - viz_tool.historical_data['timestamp'].min(), 2)} s", width=3),
+                dbc.Col(f"Time since last event: {round(time.time() - viz_tool.historical_data.query('channel!=-1')['timestamp'].max(), 2)} s", width=3),
+                dbc.Col(f"λ1: {viz_tool.historical_data['wn_1'].iloc[-1].round(12)}", width=2),
+                dbc.Col(f"Voltage: {viz_tool.historical_data['voltage'].iloc[-1]} V", width=2),
+            ]
 
         return fig_total_counts_vs_wavenumber, fig_events_over_time, fig_3d_tof_vs_rw, fig_tof_histogram, summary_text
     

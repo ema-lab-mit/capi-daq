@@ -8,6 +8,7 @@ from threading import Thread
 import subprocess
 import psutil
 import time 
+
 SETTINGS_PATH = "C:\\Users\\EMALAB\\Desktop\\TW_DAQ\\fast_tagger_gui\\settings.json"
 
 class CustomButton(QPushButton):
@@ -303,7 +304,7 @@ class SimpleGUI(QWidget):
     def run_scan(self):
         self.status_label.setText('Running Scan...')
         thread_scan = Thread(target=self.run_scan_thread)
-        thread_plotter = Thread(target=self.run_scanning_plotter_thread)
+        thread_plotter = Thread(target= self.run_scanning_plotter_thread)
         thread_scan.start()
         thread_plotter.start()
 
@@ -322,7 +323,8 @@ class SimpleGUI(QWidget):
     def save_data(self):
         options = QFileDialog.Options()
         options |= QFileDialog.DontUseNativeDialog
-        self.save_path = QFileDialog.getExistingDirectory(self, "Select Saving Directory", options=options)
+        default_dir = "D:\\NewData"
+        self.save_path = QFileDialog.getExistingDirectory(self, "Select Saving Directory", default_dir, options=options)
         if self.save_path:
             self.update_settings(self.save_path)
             self.status_label.setText(f'Saving Directory: {self.save_path}')

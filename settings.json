@@ -1,1 +1,1 @@
-{"saving_folder": "C:\\Users\\EMALAB\\Desktop\\fooo", "saving_file": "C:\\Users\\EMALAB\\Desktop\\fooo\\scan_2024_07_26_17_55_09.parquet", "tof_start": "1e-6", "tof_end": "20e-6", "pv_name": "wavenumber_1", "channel_level": "-0.5", "trigger_level": "-0.4", "data_format": "parquet"}
+{"saving_folder": "D:\\NewData", "saving_file": "D:\\NewData\\monitor_2024_07_29_19_55_33.parquet", "tof_start": "1e-6", "tof_end": "20e-6", "pv_name": "wavenumber_1", "channel_level": "-0.5", "trigger_level": "-0.4", "data_format": "parquet"}
