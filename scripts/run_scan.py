@@ -10,8 +10,9 @@ import json
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
 import serial
-import pyarrow as pa
-import pyarrow.parquet as pq
+# import pyarrow as pa
+# import pyarrow.parquet as pq
+import fastparquet
 
 this_path = os.path.abspath(__file__)
 father_path = "C:\\Users\\EMALAB\\Desktop\\TW_DAQ"
@@ -104,17 +105,30 @@ def create_saving_path(folder_location, saving_format, label="scan_"):
     name = label + identifier + "." + saving_format
     return os.path.join(folder_location, name)
 
+# def write_to_file(saving_file):
+#     while not stop_event.is_set() or not data_queue.empty():
+#         try:
+#             data_batch = data_queue.get(timeout=1)
+#             df = pd.DataFrame(data_batch, columns=["bunch", "n_events", "channel", "time_offset", "timestamp", "voltage", "wn_1", "wn_2", "wn_3", "wn_4"])
+#             table = pa.Table.from_pandas(df)
+#             if not os.path.exists(saving_file):
+#                 pq.write_table(table, saving_file)
+#             else:
+#                 with pq.ParquetWriter(saving_file, table.schema, compression='snappy') as writer:
+#                     writer.write_table(table)
+#         except queue.Empty:
+#             continue
+
 def write_to_file(saving_file):
     while not stop_event.is_set() or not data_queue.empty():
         try:
             data_batch = data_queue.get(timeout=1)
             df = pd.DataFrame(data_batch, columns=["bunch", "n_events", "channel", "time_offset", "timestamp", "voltage", "wn_1", "wn_2", "wn_3", "wn_4"])
-            table = pa.Table.from_pandas(df)
-            if not os.path.exists(saving_file):
-                pq.write_table(table, saving_file)
-            else:
-                with pq.ParquetWriter(saving_file, table.schema, compression='snappy') as writer:
-                    writer.write_table(table)
+
+            if os.path.exists(saving_file):
+                fastparquet.write(saving_file, df, append=True)
+            else: 
+                df.to_parquet(saving_file)
         except queue.Empty:
             continue
 
