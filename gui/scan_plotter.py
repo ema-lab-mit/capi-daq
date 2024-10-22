@@ -120,7 +120,7 @@ class PlotGenerator:
         if self.unseen_new_data.empty:
             return 0
         number_bunches = self.unseen_new_data['bunch'].max() - self.unseen_new_data['bunch'].min() + 1
-        time_diff = self.unseen_new_data['timestamp'].max() - self.unseen_new_data['timestamp'].min()
+        time_diff = self.unseen_new_data['time'].max().timestamp() - self.unseen_new_data['timestamp'].min().timestamp()
         self.trigger_rate = number_bunches / time_diff
         return self.trigger_rate
     
@@ -155,9 +155,8 @@ class PlotGenerator:
             self.historical_data = self.historical_data.tail(TOTAL_MAX_POINTS)
         
     def update_content(self, new_data):
-        unseen_new_data = new_data[new_data['timestamp'] > self.last_loaded_time]
-        print(unseen_new_data)
-        self.last_loaded_time = new_data['timestamp'].max()
+        unseen_new_data = new_data[new_data['time'].apply(lambda x: x.timestamp()) > self.last_loaded_time]
+        self.last_loaded_time = new_data['time'].max().timestamp()
         self.unseen_new_data = unseen_new_data
         if unseen_new_data.empty:
             return
