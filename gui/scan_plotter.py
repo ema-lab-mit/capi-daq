@@ -39,7 +39,7 @@ default_settings = {
     "tof_hist_nbins": 100,
     "tof_hist_min": 1e-6,
     "tof_hist_max": 20e-6,
-    "rolling_window": 100,
+    "rolling_window": 10,
 }
 
 # Initialize InfluxDB client
@@ -62,7 +62,7 @@ class PlotGenerator:
         self.tof_hist_min = settings_dict.get("tof_hist_min", 0)
         self.tof_hist_max = settings_dict.get("tof_hist_max", 20e-6)
         
-        self.rolling_window = settings_dict.get("rolling_window", 100)
+        self.rolling_window = settings_dict.get("rolling_window", 10)
         
         self._historic_timeseries_columns = ["bunch", "timestamp", "n_events", "channel", "wn_1", "wn_2", "wn_3", "wn_4", "voltage"]
         self.historical_data = pd.DataFrame(columns=self._historic_timeseries_columns)
@@ -109,8 +109,8 @@ class PlotGenerator:
         events_data = unseen_new_data.query("channel != -1")
         events_data = events_data[(events_data['time_offset'] >= global_tof_min) & (events_data['time_offset'] <= global_tof_max)]
         self.total_events += len(events_data)
-        events_offset = events_data["time_offset"].values
         if len(events_data) > 0:
+            events_offset = events_data["time_offset"].values
             new_hist_counts, _ = np.histogram(events_offset, bins=self.tof_histogram_bins)
             self.histogram_counts += new_hist_counts
             self.tof_mean = np.average(self.tof_histogram_bins[:-1], weights=self.histogram_counts)
@@ -120,7 +120,7 @@ class PlotGenerator:
         if self.unseen_new_data.empty:
             return 0
         number_bunches = self.unseen_new_data['bunch'].max() - self.unseen_new_data['bunch'].min() + 1
-        time_diff = self.unseen_new_data['time'].max().timestamp() - self.unseen_new_data['timestamp'].min().timestamp()
+        time_diff = self.unseen_new_data['time'].max().timestamp() - self.unseen_new_data['time'].min().timestamp()
         self.trigger_rate = number_bunches / time_diff
         return self.trigger_rate
     
@@ -143,8 +143,8 @@ class PlotGenerator:
         if len(self.all_wns_measurements) > self.rolling_window:
             time_window = self.trigger_rate * self.integration_window
             self.rolled_all_wns = np.convolve(self.all_wns_measurements, np.ones(self.rolling_window)/self.rolling_window, mode="valid")
-            self.rolled_all_nevents = np.convolve(self.all_nevents_measurements, np.ones(self.rolling_window) / time_window, mode="valid")
             
+            self.rolled_all_nevents = np.convolve(self.all_nevents_measurements, np.ones(self.rolling_window) / time_window, mode="valid")
             # Compute errors for the convolution
             nevents_errors = np.sqrt(self.all_nevents_measurements)
             self.rolled_all_errors = np.sqrt(np.convolve(nevents_errors**2, np.ones(self.rolling_window) / time_window, mode="valid"))
@@ -170,7 +170,7 @@ class PlotGenerator:
         if len(self.historical_data.n_events) == 0:
             return fig
         events = self.historical_data.n_events.values
-        times = self.historical_data.timestamp.values
+        times = self.historical_data.time.apply(lambda x: x.timestamp()).values
         delta_ts = times - self.first_time
         if len(delta_ts) > max_points:
             events = events[-max_points:]
@@ -262,9 +262,8 @@ class PlotGenerator:
         """
         Plot the 2D histogram of the event rate vs the wavenumber with reduced bins
         """
-        if self.historical_data.empty:
+        if self.historical_data.empty or len(self.rolled_all_wns)==0:
             return go.Figure()
-
         # Create a DataFrame with wavenumber and event count
         df = pd.DataFrame({
             "wn": self.rolled_all_wns,
@@ -299,7 +298,6 @@ class PlotGenerator:
             yaxis_title="Event Rate",
             uirevision='rate_vs_wavenumber'
         )
-
         return fig
     
     def plot_3d_tof_rw(self):

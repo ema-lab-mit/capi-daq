@@ -231,7 +231,7 @@ class PlotGenerator:
         colors = ["blue", "red", "green", "purple"]
         delta_ts = self.historical_data["time"].apply(lambda x: x.timestamp()).values - self.first_time
         for i, channel in enumerate(selected_channels):
-            if f"wn_{channel}" in self.historical_data.columns and self.historical_data[f"wn_{channel}"].mean() >= 0:
+            if f"wn_{channel}" in self.historical_data.columns and self.historical_data[f"wn_{channel}"].mean() > 0.:
                 if channel == 1:
                     print( self.historical_data[f"wn_{channel}"].iloc[-1])           
                 last_data = self.historical_data[f"wn_{channel}"].iloc[-1]

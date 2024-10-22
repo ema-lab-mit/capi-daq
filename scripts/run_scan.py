@@ -28,7 +28,7 @@ from fast_tagger_gui.src.devices.multimeter import VoltageReader, HP_Multimeter
 from fast_tagger_gui.src.devices.wavemeter import WavenumberReader
 
 SETTINGS_PATH = "C:\\Users\\EMALAB\\Desktop\\TW_DAQ\\fast_tagger_gui\\settings.json"
-POSTING_BATCH_SIZE = 2
+POSTING_BATCH_SIZE = 10
 db_token = get_secrets()
 os.environ["INFLUXDB_TOKEN"] = db_token
 INFLUXDB_URL = "http://localhost:8086"
