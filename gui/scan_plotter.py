@@ -156,6 +156,7 @@ class PlotGenerator:
         
     def update_content(self, new_data):
         unseen_new_data = new_data[new_data['timestamp'] > self.last_loaded_time]
+        print(unseen_new_data)
         self.last_loaded_time = new_data['timestamp'].max()
         self.unseen_new_data = unseen_new_data
         if unseen_new_data.empty:

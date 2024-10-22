@@ -39,7 +39,7 @@ default_settings = {
     "plot_rolling_window": 10,
     "integration_window": 10,
 }
-REFRESH_RATE = 0.2  # in seconds
+REFRESH_RATE = 0.5  # in seconds
 
 client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
 query_api = client.query_api()
@@ -50,6 +50,7 @@ global_tof_max = default_settings['tof_hist_max']
 class PlotGenerator:
     def __init__(self, settings_dict: dict = default_settings):
         self.settings_dict = settings_dict
+        print("YES")
         self.tof_hist_nbins = settings_dict.get("tof_hist_nbins", 100)
         self.tof_hist_min = settings_dict.get("tof_hist_min", 0)
         self.tof_hist_max = settings_dict.get("tof_hist_max", 20e-6)
@@ -62,6 +63,7 @@ class PlotGenerator:
         self.historical_rates_ns = np.array([])
         self.historical_rates_ts = np.array([])
         self.first_time = time.time()
+        self.number_records = 0
         
         self.total_events = 0
         self.tof_mean = 0
@@ -109,7 +111,7 @@ class PlotGenerator:
         self.historical_rates_ts = np.append(self.historical_rates_ts, bunch_times)
         
     def update_content(self, new_data):
-        unseen_new_data = new_data[new_data['timestamp'] > self.last_loaded_time]
+        unseen_new_data = new_data[new_data['time'].apply(lambda x: x.timestamp()) > self.last_loaded_time]
         # Filter within the time of flight range
         unseen_new_data = unseen_new_data[((unseen_new_data['time_offset'] >= global_tof_min) & (unseen_new_data['time_offset'] <= global_tof_max)) | (unseen_new_data['channel'] == -1)]
 
@@ -130,11 +132,12 @@ class PlotGenerator:
         return self.trigger_rate
     
     def estimate_rates(self, unseen_new_data: pd.DataFrame) -> pd.Series:
+        print("Estimate rates")
         if self.unseen_new_data.empty:
             return pd.Series()
         channel_ids = unseen_new_data['channel'].unique()
         rates = {}
-        delta_t = (unseen_new_data['timestamp'].max() - unseen_new_data['timestamp'].min())
+        delta_t = (unseen_new_data['time'].max().timestamp() - unseen_new_data['time'].min().timestamp())
         for channel_id in channel_ids:
             filtered_new_data = unseen_new_data.drop_duplicates("bunch").query(f"channel == {channel_id}")
             if channel_id !=-1:
@@ -151,7 +154,6 @@ class PlotGenerator:
         fig = go.Figure()
         delta_ts = self.historical_rates_ts - self.first_time
         events = self.historical_rates_ns
-        # DO NOT TRY TO PLOT IF THERE ARE TOO MANY
         if len(delta_ts) > max_points:
             events = events[-max_points:]
             delta_ts = delta_ts[-max_points:]
@@ -227,9 +229,11 @@ class PlotGenerator:
         if self.historical_data.empty:
             return fig
         colors = ["blue", "red", "green", "purple"]
-        delta_ts = self.historical_data["timestamp"] - self.first_time
+        delta_ts = self.historical_data["time"].apply(lambda x: x.timestamp()).values - self.first_time
         for i, channel in enumerate(selected_channels):
-            if f"wn_{channel}" in self.historical_data.columns and self.historical_data[f"wn_{channel}"].mean() > 0:
+            if f"wn_{channel}" in self.historical_data.columns and self.historical_data[f"wn_{channel}"].mean() >= 0:
+                if channel == 1:
+                    print( self.historical_data[f"wn_{channel}"].iloc[-1])           
                 last_data = self.historical_data[f"wn_{channel}"].iloc[-1]
                 decimation_factor = (len(delta_ts) // max_points) if len(delta_ts) > max_points else 1
                 decimated_ts = delta_ts[::decimation_factor]
@@ -261,8 +265,8 @@ class PlotGenerator:
         fig = go.Figure()
         if self.historical_data.empty:
             return fig
-        delta_ts = self.historical_data["timestamp"] - self.first_time
-        if "voltage" in self.historical_data.columns and self.historical_data["voltage"].mean() > 0:
+        delta_ts = self.historical_data["time"].apply(lambda x: x.timestamp()) - self.first_time
+        if "voltage" in self.historical_data.columns and self.historical_data["voltage"].mean() >= 0:
             last_data = self.historical_data["voltage"].iloc[-1]
             decimated_data = self.historical_data["voltage"].tail(max_points)
             decimated_ts = delta_ts.tail(max_points)
@@ -325,12 +329,16 @@ def query_influxdb(minus_time_str, measurement_name):
         df = df.rename(columns={'_time': 'time'})
         df['time'] = pd.to_datetime(df['time'])
         column_order = ['time', 'bunch', 'n_events', 'channel', 'time_offset', 'timestamp', 'wn_1', 'wn_2', 'wn_3', 'wn_4', 'voltage']
+        cols_in_df = [c for c in column_order if c in df.columns]
+        for col in column_order:
+            if col not in cols_in_df:   
+                df[col] = [None] * len(df)
         return df[column_order]
     except Exception as e:
         print(f"Error querying InfluxDB: {e}")
         return pd.DataFrame(columns=['time', 'bunch', 'n_events', 'channel', 'time_offset', "timestamp", 'wn_1', 'wn_2', 'wn_3', 'wn_4', 'voltage'])
 
-app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
+app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], suppress_callback_exceptions=True)
 
 app.layout = dbc.Container([
     dbc.NavbarSimple(
@@ -501,16 +509,6 @@ def toggle_events_settings(n1, n2, is_open):
     [State("tof-settings-modal", "is_open")]
 )
 def toggle_tof_settings(n1, n2, is_open):
-    if n1 or n2:
-        return not is_open
-    return is_open
-
-@app.callback(
-    Output("wavenumbers-settings-modal", "is_open"),
-    [Input("wavenumbers-settings-button", "n_clicks"), Input("close-wavenumbers-modal", "n_clicks")],
-    [State("wavenumbers-settings-modal", "is_open")]
-)
-def toggle_wavenumbers_settings(n1, n2, is_open):
     if n1 or n2:
         return not is_open
     return is_open

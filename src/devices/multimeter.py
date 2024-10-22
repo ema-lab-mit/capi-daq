@@ -25,11 +25,12 @@ class HP_Multimeter:
     
     def getVoltage(self):
         self.device.write(b"MEAS:VOLT:DC?\n")
-        response = self.device.readline().decode('utf-8').strip('\r\n')
         try:
+            response = self.device.readline().decode('utf-8').strip('\r\n')
             response = float(response)
         except Exception as expn:
-            print('uh oh, exception occurred', expn, response)
+            print('uh oh, exception occurred reading the voltage', expn)
+            response = 0.0
         return response
 
 class VoltageReader(threading.Thread):

@@ -67,7 +67,7 @@ initialization_params = {
         "starts": [int(time_to_flops(INIT_TIME)) for _ in range(4)],
         "stops": [int(time_to_flops(STOP_TIME_WINDOW)) for _ in range(4)],
     },
-    "refresh_rate": 0.1,
+    "refresh_rate": 0.2,
 }
 
 client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
