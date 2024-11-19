@@ -91,19 +91,25 @@ class Tagger():
                     return None
                 else:
                     new_data = []
+                    
                     for d in data:
                         _t = time.time() # -> Gives the time in seconds since the epoch as a floating point number
+                        if _t == last_trigger_time:
+                            # This means that the resolutiion was overthrown.
+                            # Adding a very small number so that they are different.
+                            _t += 1e-12
                         # d has:  [packet_number, events, channel, flops since last trigger]
                         if d[2] == -1:
                             # If the d is a trigger signal we update the last trigger time
-                            d[-1] = 0#flops_to_time(d[-1])
+                            d[-1] = 0
                             d.append(_t)
                         # if the d is an event, we can compute the time since the last trigger
                         else:
                             d[-1] = flops_to_time(d[-1])
                             d.append(_t + d[-1])
                         new_data.append(d)  
-                    return new_data
+                        last_trigger_time = _t
+                    return new_data # [packet_number, events, channel, time_offset since last trigger]
             elif status == 1:  # no trigger seen yet, go to sleep for a bit and try again
                 time.sleep(0.001)
             else:

@@ -26,7 +26,7 @@ from fast_tagger_gui.src.devices.multimeter import VoltageReader, HP_Multimeter
 from fast_tagger_gui.src.devices.wavemeter import WavenumberReader
 
 SETTINGS_PATH = "C:\\Users\\EMALAB\\Desktop\\TW_DAQ\\fast_tagger_gui\\settings.json"
-POSTING_BATCH_SIZE = 2
+POSTING_BATCH_SIZE = 1
 db_token = get_secrets()
 os.environ["INFLUXDB_TOKEN"] = db_token
 INFLUXDB_URL = "http://localhost:8086"
@@ -73,16 +73,17 @@ initialization_params = {
 client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
 write_api = client.write_api(write_options=SYNCHRONOUS)
 
-def write_to_influxdb(data, data_name, voltage, wavenumbers, timestamp):
+def write_to_influxdb(data, data_name, voltage, wavenumbers):
     points = []
     for d in data:
-        points.append(Point("tagger_data").tag("type", data_name).field("bunch", d[0]).time(timestamp, WritePrecision.NS))
-        points.append(Point("tagger_data").tag("type", data_name).field("n_events", d[1]).time(timestamp, WritePrecision.NS))
-        points.append(Point("tagger_data").tag("type", data_name).field("channel", d[2]).time(timestamp, WritePrecision.NS))
-        points.append(Point("tagger_data").tag("type", data_name).field("time_offset", float(d[3])).time(timestamp, WritePrecision.NS))
-        points.append(Point("tagger_data").tag("type", data_name).field("timestamp", d[4]).time(timestamp, WritePrecision.NS))
-        points.append(Point("tagger_data").tag("type", data_name).field("voltage", voltage).time(timestamp, WritePrecision.NS))
-        points += [Point("tagger_data").tag("type", data_name).field(f"wn_{i}", wavenumbers[i-1]).time(timestamp, WritePrecision.NS) for i in range(1, 5)]
+        data_ingestion = datetime.fromtimestamp(d[-1])#.strftime()
+        points.append(Point("tagger_data").tag("type", data_name).field("bunch", d[0]).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("tagger_data").tag("type", data_name).field("n_events", d[1]).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("tagger_data").tag("type", data_name).field("channel", d[2]).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("tagger_data").tag("type", data_name).field("time_offset", float(d[3])).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("tagger_data").tag("type", data_name).field("timestamp", d[4]).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("tagger_data").tag("type", data_name).field("voltage", voltage).time(data_ingestion, WritePrecision.NS))
+        points += [Point("tagger_data").tag("type", data_name).field(f"wn_{i}", wavenumbers[i-1]).time(data_ingestion, WritePrecision.NS) for i in range(1, 5)]
     write_api.write(bucket=INFLUXDB_BUCKET, record=points)
 
 def process_input_args():
@@ -106,19 +107,13 @@ def main_loop(tagger, data_name, voltage_reader, wavenumber_reader):
     tagger.set_trigger_level(float(TRIGGER_LEVEL))
     tagger.start_reading()
     i = 0
-    batched_data = []
+    # new data -> [packet_number, events, channel, time_offset, timestamp_ingestion]
     while True:
-        timestamp = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.%fZ')
         data = tagger.get_data()
         if data is not None:
-            batched_data += data
             voltage = voltage_reader.get_voltage()
             wavenumbers = wavenumber_reader.get_wavenumbers()
-            i += 1
-            if i % POSTING_BATCH_SIZE == 0:
-                write_to_influxdb(batched_data, data_name, voltage, wavenumbers, timestamp)
-                del batched_data
-                batched_data = []
+            write_to_influxdb(data, data_name, voltage, wavenumbers)
 
 if __name__ == "__main__":
     refresh_rate, is_scanning, voltage_port = process_input_args()
@@ -129,7 +124,10 @@ if __name__ == "__main__":
     initialization_params["save_path"] = save_path
     tagger = Tagger(initialization_params=initialization_params)
     data_name = save_path.split("monitor_")[1].split(".")[0]
-    multimeter = HP_Multimeter("COM" + str(voltage_port))
+    try:
+        multimeter = HP_Multimeter("COM" + str(voltage_port))
+    except:
+        multimeter = None
     voltage_reader = VoltageReader(multimeter, refresh_rate=refresh_rate)
     wavenumber_reader = WavenumberReader(refresh_rate=refresh_rate)
     voltage_reader.start()

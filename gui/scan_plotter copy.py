@@ -123,18 +123,17 @@ class PlotGenerator:
 
     def get_trigger_rate(self):
         if self.unseen_new_data.empty:
-            self.trigger_rate = 0
-            return self.trigger_rate
+            return 0
         number_bunches = self.unseen_new_data['bunch'].max() - self.unseen_new_data['bunch'].min() + 1
         time_diff = self.unseen_new_data['time'].max().timestamp() - self.unseen_new_data['time'].min().timestamp()
-        self.trigger_rate = number_bunches / time_diff if time_diff > 0 else 0
+        self.trigger_rate = number_bunches / time_diff
         return self.trigger_rate
 
     def compute_counts_time(self, integration_time=0.5):
         # How many triggers as a function of time
         ntrigs = self.trigger_rate * integration_time  # trigs/s
         # How many events per trigger
-        number_events_per_trigger = self.total_events / len(self.historical_data) if len(self.historical_data) > 0 else 0
+        number_events_per_trigger = self.proc_events_time / len(self.historical_data)
         # Total counts in the integration time
         total_counts = ntrigs * number_events_per_trigger
         return total_counts  # counts/s
@@ -146,8 +145,9 @@ class PlotGenerator:
         self.all_wns_measurements = np.concatenate([self.all_wns_measurements, er_wn_dataframe[f"wn_{self.wn_channel_selected}"].values])
         self.all_nevents_measurements = np.concatenate([self.all_nevents_measurements, er_wn_dataframe["n_events"].values])
         if len(self.all_wns_measurements) > self.rolling_window:
-            time_window = self.trigger_rate * self.integration_window if self.trigger_rate > 0 else 1
+            time_window = self.trigger_rate * self.integration_window
             self.rolled_all_wns = np.convolve(self.all_wns_measurements, np.ones(self.rolling_window)/self.rolling_window, mode="valid")
+
             self.rolled_all_nevents = np.convolve(self.all_nevents_measurements, np.ones(self.rolling_window) / time_window, mode="valid")
             # Compute errors for the convolution
             nevents_errors = np.sqrt(self.all_nevents_measurements)
@@ -224,13 +224,9 @@ class PlotGenerator:
         if self.historical_data.empty:
             return go.Figure()
         total_plotted = np.sum(self.histogram_counts)
-        fig = px.bar(
-            y=self.tof_histogram_bins[1:]*1e6,
-            x=self.histogram_counts / total_plotted,
-            orientation='h',
-            labels={"y": "Time of Flight (µs)", "x": "Normalized Counts"},
-            title="Time of Flight Histogram",
-            template="plotly_white",
+        fig = px.bar(y=self.tof_histogram_bins[1:]*1e6, x=self.histogram_counts / total_plotted, orientation='h',
+                     labels={"y": "Time of Flight (s)", "x": "Counts"},
+                        title="Time of Flight Histogram", template="plotly_white",
         )                        
 
         fig.update_xaxes(range=[0, 1])
@@ -263,7 +259,7 @@ class PlotGenerator:
             yaxis_title="Time of Flight (µs)",
             uirevision='tof_histogram'
         )
-        # Update the x axis to be between 0 and max of the histogram +0.1
+        # Update the x axis to be between o and max of the histogram +0.1
         fig.update_xaxes(range=[0, np.max(y) + 0.1])
         return fig
 
@@ -291,9 +287,9 @@ class PlotGenerator:
 
         # Handle the last data point by assigning the same interval as the previous point
         if len(df) > 1:
-            df.at[df.index[-1], 'time_diff'] = df['time_diff'].iloc[-2]
+            df['time_diff'].iloc[-1] = df['time_diff'].iloc[-2]
         else:
-            df.at[df.index[-1], 'time_diff'] = 0
+            df['time_diff'].iloc[-1] = 0
 
         # Ensure no negative time differences
         df['time_diff'] = df['time_diff'].clip(lower=0)
@@ -342,14 +338,9 @@ class PlotGenerator:
         })
 
         # Create the plot
-        fig = px.scatter(
-            plot_df, 
-            x='wn_mid', 
-            y='rate', 
-            template='plotly_white',
-            title='Event Rate vs Wavenumber',
-            labels={'wn_mid': 'Wavenumber (cm⁻¹)', 'rate': 'Event Rate (events/s)'}
-        )
+        fig = px.scatter(plot_df, x='wn_mid', y='rate', template='plotly_white',
+                        title='Event Rate vs Wavenumber',
+                        labels={'wn_mid': 'Wavenumber (cm⁻¹)', 'rate': 'Event Rate (events/s)'})
         fig.update_traces(mode='lines+markers', line=dict(width=2))
 
         fig.update_layout(
@@ -379,17 +370,8 @@ class PlotGenerator:
         # Number of bins for time of flight
         num_bins_y = 50  # Adjust if needed
 
-        fig = px.density_heatmap(
-            df_events, 
-            x=wn_col, 
-            y="time_offset", 
-            nbinsx=num_bins_x, 
-            nbinsy=num_bins_y,
-            title="Event Rate vs ToF", 
-            template="plotly_white", 
-            marginal_x="histogram", 
-            marginal_y="violin"
-        )
+        fig = px.density_heatmap(df_events, x=wn_col, y="time_offset", nbinsx=num_bins_x, nbinsy=num_bins_y,
+                                 title="Event Rate vs ToF", template="plotly_white", marginal_x="histogram", marginal_y="violin")
         fig.update_layout(
             xaxis_title="Wavenumber (cm^-1)",
             yaxis_title="Time of Flight (s)",
@@ -400,13 +382,13 @@ class PlotGenerator:
     def _compute_er_wn_hist(self):
         er_wn_dataframe = self.unseen_new_data.query("channel != -1").drop_duplicates(subset=["bunch"])[[f"wn_{self.wn_channel_selected}", "n_events"]]
         if er_wn_dataframe.empty or len(er_wn_dataframe) == 0:
-            return self.rolled_all_wns, self.rolled_all_nevents, self.rolled_all_errors
+            return self.rolled_all_wns, self.rolled_all_nevents
 
         self.all_wns_measurements = np.concatenate([self.all_wns_measurements, er_wn_dataframe[f"wn_{self.wn_channel_selected}"].values])
         self.all_nevents_measurements = np.concatenate([self.all_nevents_measurements, er_wn_dataframe["n_events"].values])
 
         if len(self.all_wns_measurements) > self.rolling_window:
-            time_window = self.trigger_rate * self.integration_window if self.trigger_rate > 0 else 1
+            time_window = self.trigger_rate * self.integration_window
             self.rolled_all_wns = np.convolve(self.all_wns_measurements, np.ones(self.rolling_window)/self.rolling_window, mode="valid")
             self.rolled_all_nevents = np.convolve(self.all_nevents_measurements, np.ones(self.rolling_window) / time_window, mode="valid")
 
@@ -435,7 +417,7 @@ def query_influxdb(minus_time_str, measurement_name):
         df = pd.DataFrame(records).dropna()
         df = df.rename(columns={'_time': 'time'})
         df['time'] = pd.to_datetime(df['time'])
-        column_order = ['time', 'bunch', 'n_events', 'channel', 'time_offset', "timestamp", 'wn_1', 'wn_2', 'wn_3', 'wn_4', 'voltage']
+        column_order = ['time', 'bunch', 'n_events', 'channel', 'time_offset', 'timestamp', 'wn_1', 'wn_2', 'wn_3', 'wn_4', 'voltage']
         return df[column_order]
     except Exception as e:
         print(f"Error querying InfluxDB: {e}")
@@ -508,7 +490,7 @@ app.layout = dbc.Container([
             dbc.ModalHeader("Events Over Time Settings"),
             dbc.ModalBody([
                 dbc.Label(r"Integration Window = "),
-                dcc.Input(id='events-roll-input', type='number', value=10, min=1),
+                dcc.Input(id='events-roll-input', type='number', value=10),
             ]),
             dbc.ModalFooter([
                 dbc.Button("Close", id="close-events-modal", className="ml-auto")
@@ -522,11 +504,11 @@ app.layout = dbc.Container([
             dbc.ModalHeader("ToF Histogram Settings"),
             dbc.ModalBody([
                 dbc.Label("Min "),
-                dcc.Input(id='tof-hist-min-input', type='number', value=default_settings['tof_hist_min'], step=1e-6, min=0),
+                dcc.Input(id='tof-hist-min-input', type='number', value=default_settings['tof_hist_min'], step=1e-6),
                 dbc.Label("ToF Histogram Max"),
-                dcc.Input(id='tof-hist-max-input', type='number', value=default_settings['tof_hist_max'], step=1e-6, min=0),
+                dcc.Input(id='tof-hist-max-input', type='number', value=default_settings['tof_hist_max'], step=1e-6),
                 dbc.Label("Number of Bins"),
-                dcc.Slider(id='tof-bins-slider', min=1, max=100, step=5, value=default_settings['tof_hist_nbins'], marks={i: str(i) for i in range(5, 101, 5)}),
+                dcc.Slider(id='tof-bins-slider', min=1, max=100, step=5, value=default_settings['tof_hist_nbins'], marks={i: str(i) for i in range(4, 101, 5)}),
             ]),
             dbc.ModalFooter([
                 dbc.Button("Update Histogram Parameters", id="update-tof-histogram", className="ml-auto"),
@@ -621,13 +603,13 @@ def update_refresh_rate(refresh_rate):
     return int(refresh_rate * 1000)
 
 @app.callback(
-    [Output('tof-hist-min-input', 'value'),
-     Output('tof-hist-max-input', 'value'),
-     Output('tof-bins-slider', 'value')],
-    [Input('update-tof-histogram', 'n_clicks')],
-    [State('tof-hist-min-input', 'value'),
-     State('tof-hist-max-input', 'value'),
-     State('tof-bins-slider', 'value')]
+    Output('tof-hist-min-input', 'value'),
+    Output('tof-hist-max-input', 'value'),
+    Output('tof-bins-slider', 'value'),
+    Input('update-tof-histogram', 'n_clicks'),
+    State('tof-hist-min-input', 'value'),
+    State('tof-hist-max-input', 'value'),
+    State('tof-bins-slider', 'value')
 )
 def update_tof_histogram_settings(n_clicks, tof_hist_min, tof_hist_max, tof_hist_nbins):
     if n_clicks:
@@ -636,8 +618,8 @@ def update_tof_histogram_settings(n_clicks, tof_hist_min, tof_hist_max, tof_hist
 
 @app.callback(
     Output('wn-bin-width-input', 'value'),
-    [Input('update-wn-histogram', 'n_clicks')],
-    [State('wn-bin-width-input', 'value')]
+    Input('update-wn-histogram', 'n_clicks'),
+    State('wn-bin-width-input', 'value')
 )
 def update_wn_histogram_settings(n_clicks, wn_bin_width_mhz):
     if n_clicks:
@@ -645,52 +627,37 @@ def update_wn_histogram_settings(n_clicks, wn_bin_width_mhz):
     return wn_bin_width_mhz
 
 @app.callback(
-    [
-        Output('rate-vs-wavenumber', 'figure'),
-        Output('events-over-time', 'figure'),
-        Output('3d-bar-rate-vs-wavenumber', 'figure'),
-        Output('tof-histogram', 'figure'),
-        Output('summary-statistics', 'children')
-    ],
-    [
-        Input('interval-component', 'n_intervals'),
-        Input('clear-data', 'n_clicks'),
-        Input('events-roll-input', 'value'),
-        Input('update-tof-histogram', 'n_clicks'),
-        Input('update-wn-histogram', 'n_clicks')
-    ],
-    [
-        State('wn-bin-width-input', 'value'),
-        State('events-over-time', 'relayoutData'),
-        State('tof-histogram', 'relayoutData')
-    ]
+    [Output('rate-vs-wavenumber', 'figure'),
+     Output('events-over-time', 'figure'),
+     Output('3d-bar-rate-vs-wavenumber', 'figure'),
+     Output('tof-histogram', 'figure'),
+     Output('summary-statistics', 'children')],
+    [Input('interval-component', 'n_intervals'),
+     Input('clear-data', 'n_clicks'),
+     Input('events-roll-input', 'value'),
+     Input('update-tof-histogram', 'n_clicks'),
+     Input('update-wn-histogram', 'n_clicks')],
+    [State('wn-bin-width-input', 'value'),
+     State('events-over-time', 'relayoutData'),
+     State('tof-histogram', 'relayoutData')]
 )
 def update_plots(n_intervals, clear_clicks, events_roll, update_histogram_clicks, update_wn_histogram_clicks, wn_bin_width_mhz_value, events_relayout_data, tof_relayout_data):
     global viz_tool, global_tof_min, global_tof_max, er_wn_hist_cache, tof_hist_cache, tof_rw_hist_cache
     ctx = dash.callback_context
     try:
 
-        # Handle Clear Data button
-        if ctx.triggered and 'clear-data' in ctx.triggered[0]['prop_id']:
+        if ctx.triggered and 'clear-data' in ctx.triggered[0]['prop_id'] or viz_tool.total_events > TOTAL_MAX_POINTS:
             viz_tool = PlotGenerator()
             return go.Figure(), go.Figure(), go.Figure(), go.Figure(), [dbc.Col("No data available.", width=12)]
 
-        # Handle maximum data points
-        if viz_tool.total_events > TOTAL_MAX_POINTS:
-            viz_tool = PlotGenerator()
-            return go.Figure(), go.Figure(), go.Figure(), go.Figure(), [dbc.Col("No data available.", width=12)]
-
-        # Handle ToF Histogram relayout (e.g., zoom)
-        if ctx.triggered and 'tof-histogram.relayoutData' in ctx.triggered[0]['prop_id'] and tof_relayout_data:
+        if 'tof-histogram.relayoutData' in ctx.triggered[0]['prop_id'] and tof_relayout_data:
             if 'xaxis.range[0]' in tof_relayout_data and 'xaxis.range[1]' in tof_relayout_data:
                 global_tof_min = tof_relayout_data['xaxis.range[0]'] * 1e-6
                 global_tof_max = tof_relayout_data['xaxis.range[1]'] * 1e-6
 
-        # Update wavenumber bin width if needed
         if update_wn_histogram_clicks:
             viz_tool.update_wn_bin_width(wn_bin_width_mhz_value)
 
-        # Fetch new data from InfluxDB
         file_location = load_path()["saving_file"]
         measurement_name = file_location.split("scan_")[-1].split(".")[0]
         minus_time_str = datetime.strptime(measurement_name, "%Y_%m_%d_%H_%M_%S").strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -700,69 +667,30 @@ def update_plots(n_intervals, clear_clicks, events_roll, update_histogram_clicks
         
         with cache_lock:
             fig_events_over_time = viz_tool.plot_events_over_time(roll=events_roll)
-            fig_tof_histogram = viz_tool.plot_tof_histogram()
+            fig_tof_histogram = tof_hist_cache
             fig_total_counts_vs_wavenumber = viz_tool.plot_rate_vs_wavenumber_2d_histogram()
-            fig_3d_tof_vs_rw = viz_tool.plot_3d_tof_rw()
-            # Determine status based on time since last event
-            if not viz_tool.historical_data.empty and 'timestamp' in viz_tool.historical_data.columns:
-                last_event_time = viz_tool.historical_data.query('channel!=-1')['timestamp'].max()
-                time_since_last_event = time.time() - last_event_time
-                status_color = "green" if time_since_last_event < 1 else "red"
-                status_text = "Status: Online" if time_since_last_event < 1 else "Status: Offline"
-            else:
-                status_color = "red"
-                status_text = "Status: Offline"
-
-            # Prepare summary statistics
-            if not viz_tool.historical_data.empty:
-                bunch_count = len(viz_tool.historical_data['bunch'].unique())
-                total_events = viz_tool.total_events
-                running_time = round(viz_tool.historical_data['timestamp'].max() - viz_tool.historical_data['timestamp'].min(), 2)
-                time_since_last = round(time_since_last_event, 2) if 'time_since_last_event' in locals() else 0
-                lambda1 = viz_tool.historical_data['wn_1'].iloc[-1].round(12)
-                voltage = viz_tool.historical_data['voltage'].iloc[-1]
-                scan_id = measurement_name
-            else:
-                bunch_count = 0
-                total_events = 0
-                running_time = 0
-                time_since_last = 0
-                lambda1 = 0
-                voltage = 0
-                scan_id = "N/A"
-
+            fig_3d_tof_vs_rw = tof_rw_hist_cache
+            status_color = {"color": "green"} if time.time() - viz_tool.historical_data.query('channel!=-1')['timestamp'].max() < 1 else {"color": "red"}
+            status_text = "Status: Online" if time.time() - viz_tool.historical_data.query('channel!=-1')['timestamp'].max() < 1 else "Status: Offline"
             summary_text = [
                 # Status indicator: green if the last event was less than 1 second ago, red otherwise
-                dbc.Col(html.Div(status_text, style={'color': status_color}), width=2),
-                dbc.Col(f"Bunch Count: {bunch_count}", width=2),
-                dbc.Col(f"Total Events: {total_events}", width=2),
-                dbc.Col(f"Running Time: {running_time} s", width=3),
-                dbc.Col(f"Time since last event: {time_since_last} s", width=3),
-                dbc.Col(f"λ1: {lambda1}", width=2),
-                dbc.Col(f"Voltage: {voltage} V", width=2),
+                dbc.Col(status_text, style=status_color, width=2),
+                dbc.Col(f"Bunch Count: {len(viz_tool.historical_data['bunch'].unique())}", width=2),
+                dbc.Col(f"Total Events: {viz_tool.total_events}", width=2),
+                dbc.Col(f"Running Time: {round(viz_tool.historical_data['timestamp'].max() - viz_tool.historical_data['timestamp'].min(), 2)} s", width=3),
+                dbc.Col(f"Time since last event: {round(time.time() - viz_tool.historical_data.query('channel!=-1')['timestamp'].max(), 2)} s", width=3),
+                dbc.Col(f"λ1: {viz_tool.historical_data['wn_1'].iloc[-1].round(12)}", width=2),
+                dbc.Col(f"Voltage: {viz_tool.historical_data['voltage'].iloc[-1]} V", width=2),
                 # Add the measurement_name as scan id
-                dbc.Col(f"Scan ID: {scan_id}", width=2),
+                dbc.Col(f"Scan ID: {measurement_name}", width=2),
             ]
 
         return fig_total_counts_vs_wavenumber, fig_events_over_time, fig_3d_tof_vs_rw, fig_tof_histogram, summary_text
     
     except Exception as e:
         print(f"Error updating plots: {e}")
-        loading_icon = go.Scatter(
-            x=[0], 
-            y=[0], 
-            mode="text", 
-            text=["Loading..."], 
-            textfont_size=24, 
-            textposition="middle center"
-        )
-        return (
-            go.Figure(data=loading_icon, layout={'template': 'plotly_white'}),
-            go.Figure(data=loading_icon, layout={'template': 'plotly_white'}),
-            go.Figure(data=loading_icon, layout={'template': 'plotly_white'}),
-            go.Figure(data=loading_icon, layout={'template': 'plotly_white'}),
-            [dbc.Col("No data available.", width=12)]
-        )
+        loading_icon = go.Scatter(x=[0], y=[0], mode="text", text=["Loading..."], textfont_size=24, textposition="middle center")
+        return go.Figure(data=loading_icon), go.Figure(data=loading_icon), go.Figure(data=loading_icon), go.Figure(data=loading_icon), [dbc.Col("No data available.", width=12)]
 
 if __name__ == '__main__':
     app.run_server(debug=True, port=8050)

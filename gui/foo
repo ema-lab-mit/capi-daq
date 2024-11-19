@@ -1,0 +1,41 @@
+dash._grouping.SchemaLengthValidationError: Schema: [<Output `events-over-time.figure`>, <Output `tof-histogram.figure`>, <Output `wavenumbers.figure`>, <Output `voltage.figure`>, <Output `channel-distribution.figure`>, <Output `summary-statistics.children`>]
+                Path: ()
+                Expected length: 6
+                Received value of length 5:
+                    [Figure({
+    'data': [{'mode': 'text',
+              'text': [Loading...],
+              'textfont': {'size': 24},
+              'textposition': 'middle center',
+              'type': 'scatter',
+              'x': [0],
+              'y': [0]}],
+    'layout': {'template': '...'}
+}), Figure({
+    'data': [{'mode': 'text',
+              'text': [Loading...],
+              'textfont': {'size': 24},
+              'textposition': 'middle center',
+              'type': 'scatter',
+              'x': [0],
+              'y': [0]}],
+    'layout': {'template': '...'}
+}), Figure({
+    'data': [{'mode': 'text',
+              'text': [Loading...],
+              'textfont': {'size': 24},
+              'textposition': 'middle center',
+              'type': 'scatter',
+              'x': [0],
+              'y': [0]}],
+    'layout': {'template': '...'}
+}), Figure({
+    'data': [{'mode': 'text',
+              'text': [Loading...],
+              'textfont': {'size': 24},
+              'textposition': 'middle center',
+              'type': 'scatter',
+              'x': [0],
+              'y': [0]}],
+    'layout': {'template': '...'}
+}), [Col(children='No data available.', width=12)]]

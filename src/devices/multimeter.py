@@ -43,8 +43,13 @@ class VoltageReader(threading.Thread):
 
     def run(self):
         while not self.stop_event.is_set():
-            self.voltage = self.multimeter.getVoltage()
-            time.sleep(self.refresh_rate)
+            try:
+                self.voltage = self.multimeter.getVoltage()
+                time.sleep(self.refresh_rate)
+            except Exception as expn:
+                self.voltage = -69419.999999999999
+                time.sleep(self.refresh_rate)
+                
     
     def stop(self):
         self.stop_event.set()

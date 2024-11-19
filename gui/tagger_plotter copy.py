@@ -111,8 +111,10 @@ class PlotGenerator:
         
     def update_content(self, new_data):
         unseen_new_data = new_data[new_data['time'].apply(lambda x: x.timestamp()) > self.last_loaded_time]
-        self.unseen_new_data = unseen_new_data[((unseen_new_data['time_offset'] >= global_tof_min) & (unseen_new_data['time_offset'] <= global_tof_max))] # Includes trigger events
-        self.last_loaded_time = new_data['time'].max().timestamp()
+        unseen_new_data = unseen_new_data[((unseen_new_data['time_offset'] >= global_tof_min) & (unseen_new_data['time_offset'] <= global_tof_max)) | (unseen_new_data['channel'] == -1)]
+
+        self.last_loaded_time = new_data['timestamp'].max()
+        self.unseen_new_data = unseen_new_data
         self.get_trigger_rate()
         self.integration_time = 1 / (self.integration_window * self.trigger_rate)
         self._update_historical_data(unseen_new_data)
@@ -122,9 +124,8 @@ class PlotGenerator:
     def get_trigger_rate(self):
         if self.unseen_new_data.empty:
             return 1
-        non_trigger_new_data = self.unseen_new_data.query("channel != -1")
-        number_bunches = non_trigger_new_data['bunch'].max() - non_trigger_new_data['bunch'].min()
-        time_diff = non_trigger_new_data['timestamp'].max() - non_trigger_new_data['timestamp'].min()
+        number_bunches = self.unseen_new_data['bunch'].max() - self.unseen_new_data['bunch'].min() + 1
+        time_diff = self.unseen_new_data['timestamp'].max() - self.unseen_new_data['timestamp'].min()
         self.trigger_rate = number_bunches / time_diff if time_diff > 0 else 0
         return self.trigger_rate
     
@@ -140,31 +141,35 @@ class PlotGenerator:
                 event_numbers = len(filtered_new_data)
                 rate = event_numbers / delta_t if delta_t > 0 else 0
             else:
-                print("Trigger rate")
                 rate = self.trigger_rate
             rates[channel_id] = rate
-        rates[-1] = self.trigger_rate
         series = pd.Series(rates).sort_values(ascending=False)
         self.last_rates = series
         return series
 
     def plot_events_over_time(self, max_points=MAX_POINTS_FOR_PLOT, yaxis_range=None, show_rolling_average=False, rolling_window_size=100):
-        
         fig = go.Figure()
         if self.historical_data.empty:
             print("No historical data")
             return fig
+
+        # Convert 'timestamp' to datetime and set as index
         df = self.historical_data.copy()
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
         df.set_index('timestamp', inplace=True)
 
+        # Resample per second and sum 'n_events' to get total events per second
         events_per_second = df['n_events'].resample('1S').sum()
+
+        # Calculate time since the first data point
         delta_ts = (events_per_second.index - pd.to_datetime(self.first_time, unit='s')).total_seconds()
 
+        # Limit to max_points
         if len(delta_ts) > max_points:
             delta_ts = delta_ts[-max_points:-1]
             events_per_second = events_per_second[-max_points:-1]
 
+        # Plot the total number of events per second
         fig.add_trace(go.Scatter(
             x=delta_ts,
             y=events_per_second,
@@ -301,9 +306,8 @@ class PlotGenerator:
     def plot_channel_distribution(self):
         if self.historical_data.empty:
             return go.Figure()
-        if self.unseen_new_data.empty:
+        if self.unseen_new_data.empty or self.unseen_new_data['channel'].nunique() == 1:
             rates = self.last_rates
-            print("No new data")
         else:
             rates = self.estimate_rates(self.unseen_new_data)
         channels = rates.index[rates > 0].tolist()
@@ -620,6 +624,7 @@ def update_plots(n_intervals, clear_clicks, update_histogram_clicks, wavenumbers
     try:
         global viz_tool, global_tof_min, global_tof_max
         ctx = dash.callback_context
+
         if ctx.triggered and 'clear-data' in ctx.triggered[0]['prop_id'] or viz_tool.total_events > TOTAL_MAX_POINTS:
             viz_tool = PlotGenerator()
             return go.Figure(), go.Figure(), go.Figure(), go.Figure(), go.Figure(), [dbc.Col("No data available.", width=12)]
@@ -636,7 +641,7 @@ def update_plots(n_intervals, clear_clicks, update_histogram_clicks, wavenumbers
         viz_tool.update_content(new_data)
 
         if new_data.empty:
-            return go.Figure(), go.Figure(), go.Figure(), go.Figure(), go.Figure(), [dbc.Col("No data available.", width=12)]
+            viz_tool.historical_event_numbers = np.append(viz_tool.historical_event_numbers, 0)
         try:
             # Determine if rolling average is enabled
             show_rolling_average = 'show_rolling_average' in show_rolling_average_values if show_rolling_average_values else False
@@ -694,7 +699,7 @@ def update_plots(n_intervals, clear_clicks, update_histogram_clicks, wavenumbers
             dbc.Col(f"Total Events: {viz_tool.total_events}", width=2),
             dbc.Col(f"Running Time: {round(viz_tool.historical_data['timestamp'].max() - viz_tool.historical_data['timestamp'].min(), 2)} s", width=3),
             dbc.Col(f"Time since last event: {round(time.time() - viz_tool.historical_data.query('channel!=-1')['timestamp'].max(), 2)} s", width=3),
-            dbc.Col(f"λ: {viz_tool.historical_data['wn_3'].iloc[-1].round(12)}", width=2),
+            dbc.Col(f"λ1: {viz_tool.historical_data['wn_1'].iloc[-1].round(12)}", width=2),
             dbc.Col(f"Voltage: {viz_tool.historical_data['voltage'].iloc[-1]} V", width=2),
             dbc.Col(f"Trigger Rate: {viz_tool.trigger_rate:.2f} Hz", width=2),
         ]
