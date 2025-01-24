@@ -1,1 +1,1 @@
-{"saving_folder": "D:\\NewData", "saving_file": "D:\\NewData\\monitor_2024_11_19_18_17_31.parquet", "tof_start": "1e-6", "tof_end": "20e-6", "pv_name": "wavenumber_3", "channel_level": "-0.1", "trigger_level": "-0.5", "data_format": "parquet", "id_counter": "0"}
+{"saving_folder": "D:\\NewData", "saving_file": "D:\\NewData\\monitor_2025_01_24_15_05_44.parquet", "tof_start": "0.5e-6", "tof_end": "150e-6", "pv_name": "wavenumber_3", "channel_level": "-0.4", "trigger_level": "0.4", "data_format": "parquet", "id_counter": "0"}

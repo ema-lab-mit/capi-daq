@@ -25,7 +25,7 @@ class WavenumberReader(threading.Thread):
         try:
             return round(float(wavenumbers_pvs[i - 1].get()), 5)
         except Exception as e:
-            print(f"Error getting wavenumber: {e}")
+            # print(f"Error getting wavenumber: {e}")
             return 0.00000
     
     def get_wavenumbers(self):

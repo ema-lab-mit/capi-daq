@@ -80,38 +80,39 @@ class Tagger():
         self.card.startReading()
         print('started reading')
 
-    def get_data(self, timeout=2):
+    def get_data(self, timeout=5, return_splitted=False):
         start = time.time()
-        last_trigger_time = 0
+        last_inp_data = 0
         while time.time() - start < timeout:
             status, data = self.card.getPackets()
             if status == 0:  # trigger detected, so there is data
                 if data == []:
                     print('no data')
-                    return None
+                    if return_splitted:
+                        return [], [], []
+                    return []
                 else:
                     new_data = []
-                    
+                    new_triggers = []
+                    new_events = []
                     for d in data:
                         _t = time.time() # -> Gives the time in seconds since the epoch as a floating point number
-                        if _t == last_trigger_time:
-                            # This means that the resolutiion was overthrown.
-                            # Adding a very small number so that they are different.
-                            _t += 1e-12
                         # d has:  [packet_number, events, channel, flops since last trigger]
-                        if d[2] == -1:
-                            # If the d is a trigger signal we update the last trigger time
+                        if d[2] == -1: # If the d is a trigger signal we update the last trigger time
                             d[-1] = 0
                             d.append(_t)
-                        # if the d is an event, we can compute the time since the last trigger
+                            new_triggers.append(d)
                         else:
                             d[-1] = flops_to_time(d[-1])
                             d.append(_t + d[-1])
-                        new_data.append(d)  
-                        last_trigger_time = _t
+                            new_events.append(d)
+                        new_data.append(d)
+                        # last_trigger_time = _t
+                    if return_splitted:
+                        return new_data, new_triggers, new_events
                     return new_data # [packet_number, events, channel, time_offset since last trigger]
             elif status == 1:  # no trigger seen yet, go to sleep for a bit and try again
-                time.sleep(0.001)
+                time.sleep(0.0001)
             else:
                 raise ValueError
         return None

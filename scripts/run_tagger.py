@@ -67,23 +67,24 @@ initialization_params = {
         "starts": [int(time_to_flops(INIT_TIME)) for _ in range(4)],
         "stops": [int(time_to_flops(STOP_TIME_WINDOW)) for _ in range(4)],
     },
-    "refresh_rate": 0.2,
+    "refresh_rate": 0.5,
 }
 
 client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
 write_api = client.write_api(write_options=SYNCHRONOUS)
 
-def write_to_influxdb(data, data_name, voltage, wavenumbers):
+def write_to_influxdb(data, data_name, voltage, wavenumbers, trigger_rate):
     points = []
     for d in data:
         data_ingestion = datetime.fromtimestamp(d[-1])#.strftime()
-        points.append(Point("tagger_data").tag("type", data_name).field("bunch", d[0]).time(data_ingestion, WritePrecision.NS))
-        points.append(Point("tagger_data").tag("type", data_name).field("n_events", d[1]).time(data_ingestion, WritePrecision.NS))
-        points.append(Point("tagger_data").tag("type", data_name).field("channel", d[2]).time(data_ingestion, WritePrecision.NS))
-        points.append(Point("tagger_data").tag("type", data_name).field("time_offset", float(d[3])).time(data_ingestion, WritePrecision.NS))
-        points.append(Point("tagger_data").tag("type", data_name).field("timestamp", d[4]).time(data_ingestion, WritePrecision.NS))
-        points.append(Point("tagger_data").tag("type", data_name).field("voltage", voltage).time(data_ingestion, WritePrecision.NS))
-        points += [Point("tagger_data").tag("type", data_name).field(f"wn_{i}", wavenumbers[i-1]).time(data_ingestion, WritePrecision.NS) for i in range(1, 5)]
+        points.append(Point("hits").tag("type", data_name).field("bunch", d[0]).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("hits").tag("type", data_name).field("n_events", d[1]).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("hits").tag("type", data_name).field("channel", d[2]).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("hits").tag("type", data_name).field("time_offset", float(d[3])).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("hits").tag("type", data_name).field("id_timestamp", d[4]).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("hits").tag("type", data_name).field("voltage", voltage).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("hits").tag("type", data_name).field("trigger_rate", trigger_rate).time(data_ingestion, WritePrecision.NS))
+        points += [Point("hits").tag("type", data_name).field(f"wn_{i}", wavenumbers[i-1]).time(data_ingestion, WritePrecision.NS) for i in range(1, 5)]
     write_api.write(bucket=INFLUXDB_BUCKET, record=points)
 
 def process_input_args():
@@ -106,14 +107,24 @@ def main_loop(tagger, data_name, voltage_reader, wavenumber_reader):
     tagger.set_trigger_falling()
     tagger.set_trigger_level(float(TRIGGER_LEVEL))
     tagger.start_reading()
-    i = 0
-    # new data -> [packet_number, events, channel, time_offset, timestamp_ingestion]
+    total_triggers = 0
+    i_time = time.time()
     while True:
-        data = tagger.get_data()
-        if data is not None:
+        h_time = time.time()
+        data, new_triggers, new_events = tagger.get_data(return_splitted=True)
+        # total_triggers += len(new_triggers)
+        if len(new_triggers) > 0:
             voltage = voltage_reader.get_voltage()
             wavenumbers = wavenumber_reader.get_wavenumbers()
-            write_to_influxdb(data, data_name, voltage, wavenumbers)
+            # delta_t_loop = time.time() - h_time
+            delta_t_total = time.time() - i_time
+            total_triggers = (new_triggers)[-1][0]# - new_triggers[0][0]
+            try:
+                trigger_rate = total_triggers / (delta_t_total)
+            except ZeroDivisionError:
+                trigger_rate = 0.000
+            write_to_influxdb(new_events, data_name, voltage, wavenumbers, trigger_rate = trigger_rate)
+        time.sleep(0.01)
 
 if __name__ == "__main__":
     refresh_rate, is_scanning, voltage_port = process_input_args()

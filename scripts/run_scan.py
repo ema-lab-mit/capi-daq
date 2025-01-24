@@ -22,7 +22,7 @@ from fast_tagger_gui.src.tag_interface import Tagger
 from fast_tagger_gui.src.system_utils import (
     get_secrets,
     load_path,
-    update_settings_file, 
+    update_settings_file,
 )
 from fast_tagger_gui.src.devices.multimeter import VoltageReader, HP_Multimeter
 from fast_tagger_gui.src.devices.wavemeter import WavenumberReader
@@ -79,19 +79,48 @@ initialization_params = {
 client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
 write_api = client.write_api(write_options=SYNCHRONOUS)
 
-def write_to_influxdb(data, data_name, voltage, wavenumbers, timestamp):
+def write_to_influxdb(batch_data, measurement_name):
+    """
+    Writes each row in batch_data to InfluxDB with the correct time & fields.
+    batch_data is a list of lists with columns:
+      [bunch, n_events, channel, time_offset, timestamp_str, voltage, wn_1, wn_2, wn_3, wn_4]
+    """
     points = []
-    for d in data:
-        data_ingestion = datetime.fromtimestamp(d[-1])#.strftime()
-        print(data_ingestion, type(data_ingestion))
-        points.append(Point("tagger_data").tag("type", data_name).field("bunch", d[0]).time(data_ingestion, WritePrecision.NS))
-        points.append(Point("tagger_data").tag("type", data_name).field("n_events", d[1]).time(data_ingestion, WritePrecision.NS))
-        points.append(Point("tagger_data").tag("type", data_name).field("channel", d[2]).time(data_ingestion, WritePrecision.NS))
-        points.append(Point("tagger_data").tag("type", data_name).field("time_offset", float(d[3])).time(data_ingestion, WritePrecision.NS))
-        points.append(Point("tagger_data").tag("type", data_name).field("timestamp", d[4]).time(data_ingestion, WritePrecision.NS))
-        points.append(Point("tagger_data").tag("type", data_name).field("voltage", voltage).time(data_ingestion, WritePrecision.NS))
-        points += [Point("tagger_data").tag("type", data_name).field(f"wn_{i}", wavenumbers[i-1]).time(data_ingestion, WritePrecision.NS) for i in range(1, 5)]
-    write_api.write(bucket=INFLUXDB_BUCKET, record=points)
+    for row in batch_data:
+        # row indices:
+        #  0 -> bunch
+        #  1 -> n_events
+        #  2 -> channel
+        #  3 -> time_offset
+        #  4 -> string timestamp, e.g. 2025-01-17T14:33:42.123456Z
+        #  5 -> voltage
+        #  6,7,8,9 -> wavenumbers
+        try:
+            # Convert the string timestamp to Python datetime
+            data_ingestion = datetime.strptime(row[4], "%Y-%m-%dT%H:%M:%S.%fZ")
+        except Exception:
+            # Fallback to now if there's any parsing error
+            data_ingestion = datetime.utcnow()
+
+        # Build a single point or multiple fields in one point
+        p = (Point("tagger_data")
+             .tag("type", measurement_name)
+             .field("bunch", row[0])
+             .field("n_events", row[1])
+             .field("channel", row[2])
+             .field("time_offset", float(row[3]))
+             .field("voltage", float(row[5]))
+             .field("wn_1", float(row[6]))
+             .field("wn_2", float(row[7]))
+             .field("wn_3", float(row[8]))
+             .field("wn_4", float(row[9]))
+             # The "timestamp" string can also be stored as a field if desired:
+             .field("timestamp_str", row[4])
+             .time(data_ingestion, WritePrecision.NS))
+        points.append(p)
+
+    if len(points) > 0:
+        write_api.write(bucket=INFLUXDB_BUCKET, record=points)
 
 def process_input_args():
     parser = argparse.ArgumentParser()
@@ -110,7 +139,10 @@ def create_saving_path(folder_location, saving_format, label="scan_"):
     return os.path.join(folder_location, name)
 
 def write_to_file(saving_file):
-    # Define the schema with all fields nullable
+    """
+    Writes the queued data to Parquet. We remove CSV-based metadata saving
+    and do not touch SQLite. Just Parquet + Influx is used.
+    """
     schema = pa.schema([
         pa.field("bunch", pa.int64(), nullable=True),
         pa.field("n_events", pa.int64(), nullable=True),
@@ -125,9 +157,9 @@ def write_to_file(saving_file):
     ])
 
     try:
-        # Open the file in binary write mode
+        # Open file in binary write mode
         file = open(saving_file, 'wb')
-        writer = pq.ParquetWriter(file, schema, )
+        writer = pq.ParquetWriter(file, schema)
         print(f"Initialized ParquetWriter for {saving_file}")
     except Exception as e:
         print(f"Error initializing ParquetWriter: {e}")
@@ -143,11 +175,11 @@ def write_to_file(saving_file):
 
             # Enforce data types
             df = df.astype({
-                "bunch": 'Int64',          # Pandas nullable integer
+                "bunch": 'Int64',
                 "n_events": 'Int64',
                 "channel": 'Int64',
                 "time_offset": 'float64',
-                "timestamp": 'string',     # Ensures it's treated as string
+                "timestamp": 'string',
                 "voltage": 'float64',
                 "wn_1": 'float64',
                 "wn_2": 'float64',
@@ -155,25 +187,18 @@ def write_to_file(saving_file):
                 "wn_4": 'float64'
             })
 
-            # Optional: Handle or log missing values
-            for column in ["bunch", "n_events", "channel"]:
-                if df[column].isnull().any():
-                    print(f"Null values found in {column}. Filling with 0.")
-                    df[column].fillna(0, inplace=True)
-
             # Convert DataFrame to PyArrow Table
             table = pa.Table.from_pandas(df, schema=schema, preserve_index=False)
 
             # Write the table as a new row group
             writer.write_table(table)
 
-            # Flush the underlying file to ensure data is written to disk
             file.flush()
             os.fsync(file.fileno())
 
             print(f"Wrote batch of size {len(data_batch)} to {saving_file}")
         except queue.Empty:
-            continue  # No data to write, continue looping
+            continue
         except Exception as e:
             print(f"Error writing to Parquet file: {e}")
 
@@ -185,89 +210,98 @@ def write_to_file(saving_file):
     except Exception as e:
         print(f"Error closing ParquetWriter: {e}")
 
-def metadata_writer(folder_location, data_complete_path, initialization_params):
-    file_name = "metadata_tagger_monitor.csv"
-    payload = {
-        "refresh_rate": initialization_params["refresh_rate"],
-        "stop_time_window": initialization_params["trigger"]["stops"],
-        "init_time": initialization_params["trigger"]["starts"],
-        "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "data_complete_path": data_complete_path,
-        "format": initialization_params.get("save_path", "").split('.')[-1],
-    }
-    metadata_path = os.path.join(folder_location, file_name)
-    try:
-        if os.path.exists(metadata_path):
-            metadata_df = pd.read_csv(metadata_path)
-            # Concatenate new payload
-            metadata_df = pd.concat([metadata_df, pd.DataFrame([payload])])
-            metadata_df.drop_duplicates(subset=["started_at"], inplace=True)
-        else:
-            metadata_df = pd.DataFrame([payload])
-        metadata_df.to_csv(metadata_path, index=False)  # Overwrite existing file with new data
-        print(f"Metadata written to {metadata_path}")
-    except Exception as e:
-        print(f"Error writing metadata: {e}")
-
-def main_loop(tagger, data_name, voltage_reader, wavenumber_reader):
+def main_loop(tagger, measurement_name, voltage_reader, wavenumber_reader):
+    """
+    Read data from the Tagger, grab voltage and wavenumbers, and send them
+    both to Parquet (via the queue) and to InfluxDB. 
+    """
     tagger.set_trigger_falling()
     tagger.set_trigger_level(float(TRIGGER_LEVEL))
     tagger.start_reading()
     i = 0
     batched_data = []
+
     while not stop_event.is_set():
-        timestamp = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+        # We'll store the string-based timestamp for each event
+        # But we only generate a single "batch" timestamp per iteration
+        now_str = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.%fZ')
         data = tagger.get_data()
+
         if data is not None:
+            # We retrieve voltage and wavenumbers once per cycle
+            # (Alternatively, you could measure them once per event, 
+            #  but that might slow things down.)
+            voltage = voltage_reader.get_voltage()
+            wavenumbers = wavenumber_reader.get_wavenumbers()
+
             for d in data:
-                voltage = voltage_reader.get_voltage()
-                wavenumbers = wavenumber_reader.get_wavenumbers()
+                # d is [bunch, n_events, channel, time_offset, raw_tagger_timestamp]
+                # We'll keep the fifth field (tagger's raw timestamp) 
+                # or we can ignore it. We'll store our 'now_str' as official.
                 batched_data.append([
-                    d[0], d[1], d[2], float(d[3]), d[4],
-                    voltage, wavenumbers[0], wavenumbers[1], wavenumbers[2], wavenumbers[3]
+                    d[0],       # bunch
+                    d[1],       # n_events
+                    d[2],       # channel
+                    float(d[3]),# time_offset
+                    now_str,    # string timestamp (UTC)
+                    voltage,
+                    wavenumbers[0],
+                    wavenumbers[1],
+                    wavenumbers[2],
+                    wavenumbers[3]
                 ])
+
             i += 1
             if i % POSTING_BATCH_SIZE == 0:
                 try:
+                    # Put the entire batch into the queue for Parquet
                     data_queue.put(batched_data, timeout=1)
-                    write_to_influxdb(batched_data, data_name, voltage, wavenumbers, timestamp)
+                    # Write the same batch to Influx
+                    write_to_influxdb(batched_data, measurement_name)
                     batched_data = []
                 except queue.Full:
-                    print("Data queue is full. Dropping data or handling overflow.")
-                    # Optionally, implement strategies like clearing the queue, notifying, etc.
+                    print("Data queue is full. Dropping data or handle overflow.")
                 if i % 100 == 0:
-                    print(f"Processed {i} batches. Queue size: {data_queue.qsize()}")
-    # Ensure all remaining data is processed before exiting
+                    print(f"Processed {i} cycles. Queue size: {data_queue.qsize()}")
+
+    # Final flush before exit
     if batched_data:
         try:
             data_queue.put(batched_data, timeout=1)
+            write_to_influxdb(batched_data, measurement_name)
         except queue.Full:
             print("Data queue is full on final data put.")
 
 if __name__ == "__main__":
     refresh_rate, is_scanning, voltage_port = process_input_args()
     initialization_params["refresh_rate"] = refresh_rate
+
+    # Load the path from JSON
     folder_location = load_path()["saving_folder"]
     save_path = create_saving_path(folder_location, SAVING_FORMAT, label="scan_")
     update_settings_file(save_path)
     initialization_params["save_path"] = save_path
+
     tagger = Tagger(initialization_params=initialization_params)
-    data_name = save_path.split("scan_")[1].split(".")[0]
+    # Extract a unique measurement name from the newly created file
+    # e.g. scan_2025_01_17_14_33_42.parquet => measurement_name=2025_01_17_14_33_42
+    measurement_name = os.path.basename(save_path).split("scan_")[1].split(".")[0]
+
     multimeter = HP_Multimeter("COM" + str(voltage_port))
     voltage_reader = VoltageReader(multimeter, refresh_rate=refresh_rate)
     wavenumber_reader = WavenumberReader(refresh_rate=refresh_rate)
     voltage_reader.start()
     wavenumber_reader.start()
-    
-    metadata_writer(folder_location, save_path, initialization_params)
-    
+
+    # Start parquet writer in background
     writer_thread = threading.Thread(target=write_to_file, args=(save_path,), daemon=True)
     writer_thread.start()
 
     try:
-        main_loop(tagger, data_name, voltage_reader, wavenumber_reader)
+        main_loop(tagger, measurement_name, voltage_reader, wavenumber_reader)
     except KeyboardInterrupt:
         print("KeyboardInterrupt received. Stopping DAQ.")
+    finally:
         stop_event.set()
         voltage_reader.stop()
         wavenumber_reader.stop()
