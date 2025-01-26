@@ -66,7 +66,7 @@ INFLUXDB_TOKEN = db_token
 INFLUXDB_ORG = "EMAMIT"
 INFLUXDB_BUCKET = "DAQ"
 
-NBATCH = 2_00
+NBATCH = 5_00
 TOTAL_MAX_POINTS = 50_000
 MAX_POINTS_FOR_PLOT = 100
 BEAMLINE_FREQUENCY = 50  # Hz
@@ -93,11 +93,10 @@ class PlotGenerator:
         self.max_historical_length = 10000  # Adjust based on your requirements
 
         self.historical_data = pd.DataFrame()
+        self.unseen_new_data = pd.DataFrame()
 
         self.last_loaded_time = None
         self.first_time = time.time()
-        self.number_records = 0
-        self.last_data_batch = pd.DataFrame()
 
         self.tof_mean = 0
         self.tof_var = 0
@@ -141,12 +140,26 @@ class PlotGenerator:
         Add only the portion of new_data that is more recent than the last loaded time.
         Then update histograms, triggers, etc.
         """
-        unseen_new_data = new_data[
+        # Check that the new data is already in the historical data
+        
+        if not self.historical_data.empty:
+            unseen_new_data = new_data[~new_data["id_timestamp"].isin(self.historical_data["id_timestamp"])]
+        else:
+            unseen_new_data = new_data
+            
+        print(len(new_data), len(unseen_new_data))
+        unseen_new_data = unseen_new_data[
             ((new_data["time_offset"] >= global_tof_min) & (new_data["time_offset"] <= global_tof_max))
         ]
+        self.unseen_new_data = unseen_new_data
 
-        self.trigger_rate = unseen_new_data["trigger_rate"].values[0] if unseen_new_data["trigger_rate"].values[0] !=0 else self.trigger_rate
-        
+        # if there's a non-zero trigger_rate in unseen_new_data, update self.trigger_rate
+        if not unseen_new_data.empty and "trigger_rate" in unseen_new_data.columns:
+            # Use the last nonzero trigger_rate found
+            last_trigger_rate_series = unseen_new_data[unseen_new_data["trigger_rate"] != 0]["trigger_rate"]
+            if not last_trigger_rate_series.empty:
+                self.trigger_rate = last_trigger_rate_series.iloc[-1]
+
         # Limit the size of historical data to prevent memory bloat
         self.historical_data = pd.concat([self.historical_data, unseen_new_data]).tail(self.max_historical_length)
         
@@ -158,8 +171,12 @@ class PlotGenerator:
                               show_rolling_average=False, rolling_window_size=100):
         try:
             fig = go.Figure()
+            
 
-            df = self.historical_data.copy()
+            df = self.historical_data.copy().drop_duplicates(subset=["bunch"])
+            if len(df) == 0:
+                return fig
+
             df["id_timestamp"] = pd.to_datetime(df["id_timestamp"], unit="s")
             df.set_index("id_timestamp", inplace=True)
 
@@ -221,11 +238,12 @@ class PlotGenerator:
             # Probability distribution
             bin_edges = self.tof_histogram_bins
             bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+            time_total = time.time() - self.init_time
 
             fig = px.bar(
                 x=bin_centers * 1e6,
-                y=self.histogram_counts,
-                labels={"x": "ToF (µs)", "y": "Counts"},
+                y=self.histogram_counts / time_total,
+                labels={"x": "ToF (µs)", "y": "Count Rate"},
             )
             mean = self.tof_mean * 1e6
             variance = self.tof_var * 1e12
@@ -235,6 +253,8 @@ class PlotGenerator:
                 y = norm.pdf(x, mean, sigma)
                 # scale it to match max of our histogram
                 y_scaled = y * (np.max(self.histogram_counts) / np.max(y)) if np.max(y) > 0 else 0
+                # Divide by the total running to normalize the PDF
+                y_scaled /= time_total if time_total > 0 else 1
                 fig.add_trace(
                     go.Scatter(
                         x=x,
@@ -258,7 +278,7 @@ class PlotGenerator:
 
             fig.update_layout(
                 xaxis_title="Time of Flight (µs)",
-                yaxis_title="Counts",
+                yaxis_title="Counts rate",
                 uirevision="tof_histogram",
                 template="plotly_white",
             )
@@ -274,8 +294,7 @@ class PlotGenerator:
                 return fig
             colors = ["blue", "red", "green", "purple"]
 
-            # Convert deque to DataFrame for plotting
-            df = pd.DataFrame(self.historical_data)
+            df = pd.DataFrame(self.historical_data).copy()
             if df.empty:
                 return fig
 
@@ -313,7 +332,6 @@ class PlotGenerator:
             if len(self.historical_data) == 0:
                 return fig
 
-            # Convert deque to DataFrame for plotting
             df = self.historical_data.copy().sort_values("_time")  # Ensure the DataFrame is sorted by time
 
             df["_time"] = pd.to_datetime(df["_time"])  # treat Influx time as real datetime
@@ -389,6 +407,10 @@ app.layout = dbc.Container(
                 dbc.NavItem(dbc.NavLink("Home", href="#")),
                 dbc.NavItem(dbc.NavLink("Settings", id="open-offcanvas", n_clicks=0)),
                 dbc.NavItem(dbc.NavLink("Clear Data", id="clear-data", n_clicks=0, className="ml-auto")),
+                
+                # ---- ADDED PART: Export data button in navbar ----
+                dbc.NavItem(dbc.Button("Export Data", id="export-data", n_clicks=0, 
+                                       color="secondary", className="ml-2")),
             ],
             brand="Scanning Monitor - CAPI DAQ - EMA Lab",
             brand_href="#",
@@ -457,6 +479,9 @@ app.layout = dbc.Container(
 
         # Interval for updates
         dcc.Interval(id="interval-component", interval=REFRESH_RATE * 1000, n_intervals=0),
+
+        # ---- ADDED PART: A hidden div or small placeholder to show export status ----
+        html.Div(id="export-status", style={"margin": "10px 0", "fontWeight": "bold"}),
 
         # Offcanvas for general settings
         dbc.Offcanvas(
@@ -586,7 +611,6 @@ app.layout = dbc.Container(
     fluid=True,
 )
 
-
 # --------------------------------------------------------------------------------
 # Callbacks for pop-up modals and offcanvas
 # --------------------------------------------------------------------------------
@@ -699,12 +723,12 @@ def update_plots(
     show_rolling_average_values,
     events_rolling_window_size,
 ):
-    global viz_tool  # Important to let us reassign this reference
+    global viz_tool
     ctx = dash.callback_context
     try:
         # If "Clear Data" is pressed or we exceed the limit -> reinitialize the entire PlotGenerator
         if (ctx.triggered and "clear-data" in ctx.triggered[0]["prop_id"]):
-            viz_tool = PlotGenerator()  # Reset everything
+            viz_tool.__init__()
             # Return empty figures + summary
             return (
                 go.Figure(),
@@ -719,7 +743,7 @@ def update_plots(
         measurement_name = file_location.split("monitor_")[-1].split(".")[0]
     except ImportError:
         # Fallback if load_path is not available
-        measurement_name = "default_measurement"  # Replace with your default measurement name
+        measurement_name = "default_measurement"
         minus_time_str = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     else:
         minus_time_str = datetime.strptime(measurement_name, "%Y_%m_%d_%H_%M_%S").strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -737,7 +761,7 @@ def update_plots(
         )
 
     # Handle rolling average
-    show_rolling_average = "show_rolling_average" in show_rolling_average_values if show_rolling_average_values else False
+    show_rolling_average = ("show_rolling_average" in show_rolling_average_values) if show_rolling_average_values else True
     if not events_rolling_window_size or events_rolling_window_size <= 0:
         events_rolling_window_size = default_settings["plot_rolling_window"]
 
@@ -755,12 +779,12 @@ def update_plots(
     status_text = "Status: Offline"
     status_style = {"color": "red"}
     last_time_event = None
-    # events_only = pd.DataFrame([data for data in viz_tool.historical_data if data["channel"] != -1])
+
     if not viz_tool.historical_data.empty:
         last_time_event_val = viz_tool.historical_data["id_timestamp"].max()
-        # Convert to float
-        last_time_event = float(last_time_event_val) if not pd.isnull(last_time_event_val) else None
-        print(last_time_event)
+        if not pd.isnull(last_time_event_val):
+            last_time_event = float(last_time_event_val)
+
         if last_time_event and (time.time() - last_time_event) < 2:
             status_text = "Status: Online"
             status_style = {"color": "green"}
@@ -771,9 +795,13 @@ def update_plots(
     else:
         run_time = 0
         if not viz_tool.historical_data.empty:
-            run_time = round(viz_tool.historical_data["id_timestamp"].max() - viz_tool.init_time, 2)
-        if last_time_event:
-            time_since_last = round(time.time() - last_time_event, 2)
+            # Using the difference from the first recorded id_timestamp to the last
+            run_time = round(
+                viz_tool.historical_data["id_timestamp"].max() 
+                - viz_tool.historical_data["id_timestamp"].min(), 2
+            )
+
+        time_since_last = round(time.time() - last_time_event, 2) if last_time_event else None
         last_wn = 0
         last_voltage = 0
         if "wn_3" in viz_tool.historical_data.columns and viz_tool.historical_data["wn_3"].notna().any():
@@ -804,6 +832,35 @@ def update_plots(
         fig_voltage,
         summary_text,
     )
+
+@app.callback(
+    Output("export-status", "children"),  # Show a message or status
+    Input("export-data", "n_clicks"),
+    prevent_initial_call=True
+)
+def export_data(n_clicks):
+    """
+    When the user clicks the "Export Data" button, save the current
+    viz_tool.historical_data DataFrame to a CSV on the Desktop.
+    """
+    if n_clicks:
+        try:
+            # Adjust to your actual username if needed
+            desktop_path = r"C:\Users\EMALAB\Desktop"
+            timestamp_str = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+            filename = f"historical_data_{timestamp_str}.csv"
+            full_path = os.path.join(desktop_path, filename)
+
+            # Export the DataFrame
+            if not viz_tool.historical_data.empty:
+                viz_tool.historical_data.to_csv(full_path, index=False)
+                return f"Data exported to: {full_path}"
+            else:
+                return "No data to export."
+        except Exception as e:
+            return f"Error exporting data: {str(e)}"
+    return dash.no_update
+
 
 if __name__ == "__main__":
     app.run_server(debug=True)
