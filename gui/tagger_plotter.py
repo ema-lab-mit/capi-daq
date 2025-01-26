@@ -34,7 +34,7 @@ default_settings = {
     "tof_hist_nbins": 100,
     "tof_hist_min": 1e-6,   # 1 microsecond
     "tof_hist_max": 150e-6, # 150 microseconds
-    "plot_rolling_window": 100,
+    "plot_rolling_window": 10,
     "integration_window": 10,
 }
 
@@ -69,7 +69,6 @@ INFLUXDB_BUCKET = "DAQ"
 NBATCH = 5_00
 TOTAL_MAX_POINTS = 50_000
 MAX_POINTS_FOR_PLOT = 100
-BEAMLINE_FREQUENCY = 50  # Hz
 
 REFRESH_RATE = 0.5 # seconds
 
@@ -86,7 +85,7 @@ class PlotGenerator:
         self.tof_hist_nbins = settings_dict.get("tof_hist_nbins", 100)
         self.tof_hist_min = settings_dict.get("tof_hist_min", 1e-6)
         self.tof_hist_max = settings_dict.get("tof_hist_max", 150e-6)
-        self.plot_rolling_window = settings_dict.get("plot_rolling_window", 100)
+        self.plot_rolling_window = settings_dict.get("plot_rolling_window", 10)
         self.integration_window = settings_dict.get("integration_window", 10)
 
         # Define maximum lengths for historical data to prevent memory bloat
@@ -94,9 +93,12 @@ class PlotGenerator:
 
         self.historical_data = pd.DataFrame()
         self.unseen_new_data = pd.DataFrame()
+        self.padded_historical_data = pd.DataFrame()
 
         self.last_loaded_time = None
         self.first_time = time.time()
+        self.max_empty_counter = 10
+        self.empty_counter = 0
 
         self.tof_mean = 0
         self.tof_var = 0
@@ -117,12 +119,12 @@ class PlotGenerator:
         self.histogram_counts = np.zeros(self.tof_hist_nbins)
 
     def _update_tof_statistics(self, unseen_new_data):
-        if len(unseen_new_data) == 0:
-            return
         events_data = self.historical_data
+        if events_data.empty:
+            return
         
         events_offset = events_data["time_offset"].values
-        if len(events_data) > 0:
+        if len(events_data) > 0 and self.empty_counter % self.max_empty_counter == 0:
             new_hist_counts, _ = np.histogram(events_offset, bins=self.tof_histogram_bins)
             self.histogram_counts += new_hist_counts
             
@@ -140,14 +142,11 @@ class PlotGenerator:
         Add only the portion of new_data that is more recent than the last loaded time.
         Then update histograms, triggers, etc.
         """
-        # Check that the new data is already in the historical data
-        
         if not self.historical_data.empty:
             unseen_new_data = new_data[~new_data["id_timestamp"].isin(self.historical_data["id_timestamp"])]
         else:
             unseen_new_data = new_data
             
-        print(len(new_data), len(unseen_new_data))
         unseen_new_data = unseen_new_data[
             ((new_data["time_offset"] >= global_tof_min) & (new_data["time_offset"] <= global_tof_max))
         ]
@@ -163,35 +162,45 @@ class PlotGenerator:
         # Limit the size of historical data to prevent memory bloat
         self.historical_data = pd.concat([self.historical_data, unseen_new_data]).tail(self.max_historical_length)
         
+        # If there were no new points, add a dummy point to keep the plot updating to self.padded_historical_data
+        if unseen_new_data.empty:
+            print(self.padded_historical_data.id_timestamp.values[-1])
+            dummy_data = pd.DataFrame(
+                {
+                    "bunch": [self.historical_data["bunch"].values[-1]],
+                    "n_events": [0],
+                    "time_offset": [0],
+                    "id_timestamp": [self.padded_historical_data["id_timestamp"].values[-1] + 0.5],
+                    "trigger_rate": [self.trigger_rate],
+                }
+            )
+            self.padded_historical_data = pd.concat([self.padded_historical_data, dummy_data]).tail(self.max_historical_length)
+        else:
+            self.padded_historical_data = pd.concat([self.padded_historical_data, unseen_new_data]).tail(2_000)
+        
         self.historical_data.drop_duplicates(inplace=True)  # Ensure no duplicates in historical data
         self._update_tof_statistics(unseen_new_data)
+        self.last_loaded_time = self.historical_data["id_timestamp"].max() if not self.historical_data.empty else None
         
         
     def plot_events_over_time(self, max_points=100, yaxis_range=None,
-                              show_rolling_average=False, rolling_window_size=100):
+                              show_rolling_average=False, rolling_window_size=10):
         try:
             fig = go.Figure()
             
 
-            df = self.historical_data.copy().drop_duplicates(subset=["bunch"])
-            if len(df) == 0:
-                return fig
-
+            df = self.padded_historical_data.copy()#.drop_duplicates(subset=["bunch"])
             df["id_timestamp"] = pd.to_datetime(df["id_timestamp"], unit="s")
             df.set_index("id_timestamp", inplace=True)
-
-            # Sum up "n_events" every second
-            events_per_second = df["n_events"].resample("1S").sum()
-            delta_ts = (events_per_second.index - events_per_second.index.min()).total_seconds()
-
-            if len(delta_ts) > max_points:
-                delta_ts = delta_ts[-max_points:]
-                events_per_second = events_per_second[-max_points:]
-
+            
+            events_per_second = df["n_events"].resample("S").sum()
+            times = events_per_second.index
+            nevents = events_per_second.values
+            
             fig.add_trace(
                 go.Scatter(
-                    x=delta_ts,
-                    y=events_per_second,
+                    x=times,
+                    y=nevents,
                     mode="lines",
                     name="Events per second",
                     line=dict(color="blue"),
@@ -199,10 +208,10 @@ class PlotGenerator:
             )
 
             if show_rolling_average and rolling_window_size > 1:
-                rolling_avg = events_per_second.rolling(window=rolling_window_size, min_periods=1).mean()
+                rolling_avg = np.convolve(nevents, np.ones(rolling_window_size) / rolling_window_size, mode="same")
                 fig.add_trace(
                     go.Scatter(
-                        x=delta_ts,
+                        x=pd.to_datetime(times),
                         y=rolling_avg,
                         mode="lines",
                         name=f"Rolling Avg ({rolling_window_size} pts)",

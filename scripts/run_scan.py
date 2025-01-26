@@ -10,9 +10,11 @@ import json
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
 import serial
-import pyarrow as pa
-import pyarrow.parquet as pq
 import logging
+
+# Import PyArrow removed as it's no longer needed for CSV
+# import pyarrow as pa
+# import pyarrow.parquet as pq
 
 this_path = os.path.abspath(__file__)
 father_path = "C:\\Users\\EMALAB\\Desktop\\TW_DAQ"
@@ -49,8 +51,8 @@ def get_card_settings(settings_path=SETTINGS_PATH):
             "tof_end": float(settings.get("tof_end", "20e-6")),
             "channel_level": float(settings.get("channel_level", "-0.5")),
             "trigger_level": float(settings.get("trigger_level", "-0.5")),
-            "data_format": settings.get("data_format", "parquet"),
-            "saving_file": settings.get("saving_file", "data.parquet"),
+            "data_format": settings.get("data_format", "csv"),  # Changed default to 'csv'
+            "saving_file": settings.get("saving_file", "data.csv"),  # Changed default to 'data.csv'
         }
     except Exception as e:
         print(f"Error loading settings: {e}")
@@ -61,8 +63,8 @@ STOP_TIME_WINDOW = modified_settings.get("tof_end", 20e-6)
 INIT_TIME = modified_settings.get("tof_start", 1e-6)
 CHANNEL_LEVEL = modified_settings.get("channel_level", -0.5)
 TRIGGER_LEVEL = modified_settings.get("trigger_level", -0.5)
-SAVING_FORMAT = modified_settings.get("data_format", "parquet")
-SAVING_FILE = modified_settings.get("saving_file", "data.parquet")
+SAVING_FORMAT = modified_settings.get("data_format", "csv")  # Ensure it's 'csv'
+SAVING_FILE = modified_settings.get("saving_file", "data.csv")  # Ensure it's 'csv'
 
 initialization_params = {
     "trigger": {
@@ -72,55 +74,29 @@ initialization_params = {
         "starts": [int(time_to_flops(INIT_TIME)) for _ in range(4)],
         "stops": [int(time_to_flops(STOP_TIME_WINDOW)) for _ in range(4)],
     },
-    "refresh_rate": 0.1,
+    "refresh_rate": 0.2,
 }
 
 # Initialize InfluxDB Client
 client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
 write_api = client.write_api(write_options=SYNCHRONOUS)
 
-def write_to_influxdb(batch_data, measurement_name):
-    """
-    Writes each row in batch_data to InfluxDB with the correct time & fields.
-    batch_data is a list of lists with columns:
-      [bunch, n_events, channel, time_offset, timestamp_str, voltage, wn_1, wn_2, wn_3, wn_4]
-    """
+def write_to_influxdb(data, data_name, voltage, wavenumbers, trigger_rate):
     points = []
-    for row in batch_data:
-        # row indices:
-        #  0 -> bunch
-        #  1 -> n_events
-        #  2 -> channel
-        #  3 -> time_offset
-        #  4 -> string timestamp, e.g. 2025-01-17T14:33:42.123456Z
-        #  5 -> voltage
-        #  6,7,8,9 -> wavenumbers
-        try:
-            # Convert the string timestamp to Python datetime
-            data_ingestion = datetime.strptime(row[4], "%Y-%m-%dT%H:%M:%S.%fZ")
-        except Exception:
-            # Fallback to now if there's any parsing error
-            data_ingestion = datetime.utcnow()
-
-        # Build a single point or multiple fields in one point
-        p = (Point("tagger_data")
-             .tag("type", measurement_name)
-             .field("bunch", row[0])
-             .field("n_events", row[1])
-             .field("channel", row[2])
-             .field("time_offset", float(row[3]))
-             .field("voltage", float(row[5]))
-             .field("wn_1", float(row[6]))
-             .field("wn_2", float(row[7]))
-             .field("wn_3", float(row[8]))
-             .field("wn_4", float(row[9]))
-             # The "timestamp" string can also be stored as a field if desired:
-             .field("timestamp_str", row[4])
-             .time(data_ingestion, WritePrecision.NS))
-        points.append(p)
-
-    if len(points) > 0:
+    for d in data:
+        data_ingestion = datetime.fromtimestamp(d[-1])  # Assuming d[-1] is the timestamp
+        points.append(Point("hits").tag("type", data_name).field("bunch", d[0]).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("hits").tag("type", data_name).field("n_events", d[1]).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("hits").tag("type", data_name).field("channel", d[2]).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("hits").tag("type", data_name).field("time_offset", float(d[3])).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("hits").tag("type", data_name).field("id_timestamp", d[4]).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("hits").tag("type", data_name).field("voltage", voltage).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("hits").tag("type", data_name).field("trigger_rate", trigger_rate).time(data_ingestion, WritePrecision.NS))
+        points += [Point("hits").tag("type", data_name).field(f"wn_{i}", wavenumbers[i-1]).time(data_ingestion, WritePrecision.NS) for i in range(1, 5)]
+    try:
         write_api.write(bucket=INFLUXDB_BUCKET, record=points)
+    except Exception as e:
+        print(f"Error writing to InfluxDB: {e}")
 
 def process_input_args():
     parser = argparse.ArgumentParser()
@@ -140,137 +116,168 @@ def create_saving_path(folder_location, saving_format, label="scan_"):
 
 def write_to_file(saving_file):
     """
-    Writes the queued data to Parquet. We remove CSV-based metadata saving
-    and do not touch SQLite. Just Parquet + Influx is used.
+    Writes data batches from the queue to a CSV file efficiently and safely.
+    Ensures that headers are written only once and handles file flushing to prevent corruption.
     """
-    schema = pa.schema([
-        pa.field("bunch", pa.int64(), nullable=True),
-        pa.field("n_events", pa.int64(), nullable=True),
-        pa.field("channel", pa.int64(), nullable=True),
-        pa.field("time_offset", pa.float64(), nullable=True),
-        pa.field("timestamp", pa.string(), nullable=True),
-        pa.field("voltage", pa.float64(), nullable=True),
-        pa.field("wn_1", pa.float64(), nullable=True),
-        pa.field("wn_2", pa.float64(), nullable=True),
-        pa.field("wn_3", pa.float64(), nullable=True),
-        pa.field("wn_4", pa.float64(), nullable=True),
-    ])
+    # Define the CSV headers
+    headers = [
+        "bunch", "n_events", "channel", "time_offset",
+        "id_timestamp", "voltage", "wn_1", "wn_2", "wn_3", "wn_4"
+    ]
+
+    # Determine if the file exists and is non-empty to decide on writing headers
+    file_exists = os.path.isfile(saving_file)
+    write_header = not file_exists or os.path.getsize(saving_file) == 0
 
     try:
-        # Open file in binary write mode
-        file = open(saving_file, 'wb')
-        writer = pq.ParquetWriter(file, schema)
-        print(f"Initialized ParquetWriter for {saving_file}")
+        # Open the file in append mode with buffering
+        with open(saving_file, 'a', newline='', buffering=1) as file:
+            while not stop_event.is_set() or not data_queue.empty():
+                try:
+                    data_batch = data_queue.get(timeout=1)
+                    if not data_batch:
+                        continue
+
+                    df = pd.DataFrame(data_batch, columns=headers)
+
+                    # Enforce data types
+                    df = df.astype({
+                        "bunch": 'Int64',
+                        "n_events": 'Int64',
+                        "channel": 'Int64',
+                        "time_offset": 'float64',
+                        "id_timestamp": 'string',
+                        "voltage": 'float64',
+                        "wn_1": 'float64',
+                        "wn_2": 'float64',
+                        "wn_3": 'float64',
+                        "wn_4": 'float64'
+                    })
+
+                    # Write to CSV
+                    df.to_csv(
+                        file,
+                        header=write_header,
+                        index=False,
+                        mode='a',
+                        line_terminator='\n'
+                    )
+
+                    # After the first write, headers are no longer needed
+                    if write_header:
+                        write_header = False
+
+                    # Ensure data is written to disk
+                    file.flush()
+                    os.fsync(file.fileno())
+
+                    print(f"Wrote batch of size {len(data_batch)} to {saving_file}")
+                except queue.Empty:
+                    continue
+                except Exception as e:
+                    print(f"Error writing to CSV file: {e}")
+
+            # Handle any remaining data after stop_event is set
+            while not data_queue.empty():
+                try:
+                    data_batch = data_queue.get_nowait()
+                    if not data_batch:
+                        continue
+
+                    df = pd.DataFrame(data_batch, columns=headers)
+
+                    # Enforce data types
+                    df = df.astype({
+                        "bunch": 'Int64',
+                        "n_events": 'Int64',
+                        "channel": 'Int64',
+                        "time_offset": 'float64',
+                        "id_timestamp": 'string',
+                        "voltage": 'float64',
+                        "wn_1": 'float64',
+                        "wn_2": 'float64',
+                        "wn_3": 'float64',
+                        "wn_4": 'float64'
+                    })
+
+                    # Write to CSV
+                    df.to_csv(
+                        file,
+                        header=write_header,
+                        index=False,
+                        mode='a',
+                        line_terminator='\n'
+                    )
+
+                    # After the first write, headers are no longer needed
+                    if write_header:
+                        write_header = False
+
+                    # Ensure data is written to disk
+                    file.flush()
+                    os.fsync(file.fileno())
+
+                    print(f"Wrote final batch of size {len(data_batch)} to {saving_file}")
+                except Exception as e:
+                    print(f"Error writing final data to CSV file: {e}")
+
     except Exception as e:
-        print(f"Error initializing ParquetWriter: {e}")
-        return
+        print(f"Error initializing CSV file writer: {e}")
 
-    while not stop_event.is_set() or not data_queue.empty():
-        try:
-            data_batch = data_queue.get(timeout=1)
-            df = pd.DataFrame(data_batch, columns=[
-                "bunch", "n_events", "channel", "time_offset",
-                "timestamp", "voltage", "wn_1", "wn_2", "wn_3", "wn_4"
-            ])
+    print(f"Closed CSV writer for {saving_file}")
 
-            # Enforce data types
-            df = df.astype({
-                "bunch": 'Int64',
-                "n_events": 'Int64',
-                "channel": 'Int64',
-                "time_offset": 'float64',
-                "timestamp": 'string',
-                "voltage": 'float64',
-                "wn_1": 'float64',
-                "wn_2": 'float64',
-                "wn_3": 'float64',
-                "wn_4": 'float64'
-            })
-
-            # Convert DataFrame to PyArrow Table
-            table = pa.Table.from_pandas(df, schema=schema, preserve_index=False)
-
-            # Write the table as a new row group
-            writer.write_table(table)
-
-            file.flush()
-            os.fsync(file.fileno())
-
-            print(f"Wrote batch of size {len(data_batch)} to {saving_file}")
-        except queue.Empty:
-            continue
-        except Exception as e:
-            print(f"Error writing to Parquet file: {e}")
-
-    # Final flush and close
-    try:
-        writer.close()
-        file.close()
-        print(f"Closed ParquetWriter for {saving_file}")
-    except Exception as e:
-        print(f"Error closing ParquetWriter: {e}")
-
-def main_loop(tagger, measurement_name, voltage_reader, wavenumber_reader):
+def main_loop(tagger, measurement_name, voltage_reader, wavenumber_reader, initialization_params=initialization_params):
     """
     Read data from the Tagger, grab voltage and wavenumbers, and send them
-    both to Parquet (via the queue) and to InfluxDB. 
+    both to CSV (via the queue) and to InfluxDB.
     """
     tagger.set_trigger_falling()
     tagger.set_trigger_level(float(TRIGGER_LEVEL))
     tagger.start_reading()
     i = 0
     batched_data = []
-
+    i_time = time.time()
     while not stop_event.is_set():
-        # We'll store the string-based timestamp for each event
-        # But we only generate a single "batch" timestamp per iteration
         now_str = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.%fZ')
-        data = tagger.get_data()
-
-        if data is not None:
-            # We retrieve voltage and wavenumbers once per cycle
-            # (Alternatively, you could measure them once per event, 
-            #  but that might slow things down.)
+        data, new_triggers, new_events = tagger.get_data(return_splitted=True)
+        time_now = time.time()
+        if len(new_triggers) > 0:
             voltage = voltage_reader.get_voltage()
             wavenumbers = wavenumber_reader.get_wavenumbers()
+            delta_t_total = time_now - i_time
+            try:
+                trigger_rate = new_triggers[-1][0] / (delta_t_total)
+            except ZeroDivisionError:
+                trigger_rate = 0.000
 
-            for d in data:
-                # d is [bunch, n_events, channel, time_offset, raw_tagger_timestamp]
-                # We'll keep the fifth field (tagger's raw timestamp) 
-                # or we can ignore it. We'll store our 'now_str' as official.
-                batched_data.append([
-                    d[0],       # bunch
-                    d[1],       # n_events
-                    d[2],       # channel
-                    float(d[3]),# time_offset
-                    now_str,    # string timestamp (UTC)
-                    voltage,
-                    wavenumbers[0],
-                    wavenumbers[1],
-                    wavenumbers[2],
-                    wavenumbers[3]
-                ])
-
-            i += 1
-            if i % POSTING_BATCH_SIZE == 0:
-                try:
-                    # Put the entire batch into the queue for Parquet
-                    data_queue.put(batched_data, timeout=1)
-                    # Write the same batch to Influx
-                    write_to_influxdb(batched_data, measurement_name)
-                    batched_data = []
-                except queue.Full:
-                    print("Data queue is full. Dropping data or handle overflow.")
-                if i % 100 == 0:
-                    print(f"Processed {i} cycles. Queue size: {data_queue.qsize()}")
+            write_to_influxdb(new_events, measurement_name, voltage, wavenumbers, trigger_rate=trigger_rate)
+            if len(new_events):
+                # Append timestamp to each event if not already present
+                # Assuming 'new_events' is a list of lists or tuples
+                for event in new_events:
+                    if len(event) < 5:
+                        event.append(now_str)  # Append timestamp if missing
+                    else:
+                        event[4] = now_str  # Update existing timestamp
+                batched_data += new_events
+                i += 1
+                if i % POSTING_BATCH_SIZE == 0:
+                    try:
+                        data_queue.put(batched_data, timeout=1)
+                        batched_data = []
+                    except queue.Full:
+                        print("Data queue is full on batch data put.")
+        time.sleep(initialization_params["refresh_rate"])
 
     # Final flush before exit
-    if batched_data:
-        try:
+    try:
+        if batched_data:
             data_queue.put(batched_data, timeout=1)
-            write_to_influxdb(batched_data, measurement_name)
-        except queue.Full:
-            print("Data queue is full on final data put.")
+            write_to_influxdb(batched_data, measurement_name, voltage, wavenumbers, trigger_rate=trigger_rate)
+    except queue.Full:
+        print("Data queue is full on final data put.")
+    except Exception as e:
+        print(f"Error during final data put: {e}")
 
 if __name__ == "__main__":
     refresh_rate, is_scanning, voltage_port = process_input_args()
@@ -284,7 +291,7 @@ if __name__ == "__main__":
 
     tagger = Tagger(initialization_params=initialization_params)
     # Extract a unique measurement name from the newly created file
-    # e.g. scan_2025_01_17_14_33_42.parquet => measurement_name=2025_01_17_14_33_42
+    # e.g. scan_2025_01_17_14_33_42.csv => measurement_name=2025_01_17_14_33_42
     measurement_name = os.path.basename(save_path).split("scan_")[1].split(".")[0]
 
     multimeter = HP_Multimeter("COM" + str(voltage_port))
@@ -293,12 +300,12 @@ if __name__ == "__main__":
     voltage_reader.start()
     wavenumber_reader.start()
 
-    # Start parquet writer in background
+    # Start CSV writer in background
     writer_thread = threading.Thread(target=write_to_file, args=(save_path,), daemon=True)
     writer_thread.start()
 
     try:
-        main_loop(tagger, measurement_name, voltage_reader, wavenumber_reader)
+        main_loop(tagger, measurement_name, voltage_reader, wavenumber_reader, initialization_params)
     except KeyboardInterrupt:
         print("KeyboardInterrupt received. Stopping DAQ.")
     finally:

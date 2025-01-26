@@ -31,8 +31,10 @@ INFLUXDB_TOKEN = db_token
 INFLUXDB_ORG = "EMAMIT"
 INFLUXDB_BUCKET = "DAQ"
 NBATCH = 1_000
-TOTAL_MAX_POINTS = int(100_000_000)
+TOTAL_MAX_POINTS = int(10_000_000)
 MAX_POINTS_FOR_PLOT = 500
+
+CHANNEL_USED =  'wn_1'
 
 # Default settings
 default_settings = {
@@ -61,11 +63,12 @@ class PlotGenerator:
         self.rolling_window = settings_dict.get("rolling_window", 10)
         self.wn_bin_width_mhz = settings_dict.get("wn_bin_width_mhz", 10)
         self.wn_bin_width_cm1 = self.wn_bin_width_mhz / 29.9792458e3
-        self._historic_timeseries_columns = [
-            "time","bunch","n_events","channel","time_offset",
-            "timestamp","wn_1","wn_2","wn_3","wn_4","voltage"
-        ]
-        self.historical_data = pd.DataFrame(columns=self._historic_timeseries_columns)
+
+        self.historical_data = pd.DataFrame()
+        self.unseen_new_data = pd.DataFrame()
+        
+        self.last_loaded_time = None
+        self.first_time = time.time()
 
         # For the histogram
         self.tof_histogram_bins = np.linspace(self.tof_hist_min, self.tof_hist_max, self.tof_hist_nbins + 1)
@@ -91,10 +94,9 @@ class PlotGenerator:
         if unseen_new_data.empty:
             return
         # Only keep valid channels and time offsets in [global_tof_min, global_tof_max]
-        events_data = unseen_new_data.query("channel != -1").copy()
         events_data = events_data[
-            (events_data['time_offset'] >= global_tof_min) &
-            (events_data['time_offset'] <= global_tof_max)
+            (events_data['_time_offset'] >= global_tof_min) &
+            (events_data['_time_offset'] <= global_tof_max)
         ]
         self.total_events += len(events_data)
         if len(events_data) > 0:
@@ -117,73 +119,76 @@ class PlotGenerator:
             self.historical_data = self.historical_data.tail(TOTAL_MAX_POINTS)
 
     def update_content(self, new_data):
-        # Filter out anything older than we have
-        mask = new_data['time'].apply(lambda x: x.timestamp()) > self.last_loaded_time
-        unseen_new_data = new_data.loc[mask]
+        if not self.historical_data.empty:
+            unseen_new_data = new_data[~new_data["id_timestamp"].isin(self.historical_data["id_timestamp"])]
+        else:
+            unseen_new_data = new_data
         if not new_data.empty:
-            self.last_loaded_time = new_data['time'].max().timestamp()
-        if unseen_new_data.empty:
-            return
+            self.last_loaded_time = new_data['_time'].max().timestamp()
+        print(len(new_data), len(unseen_new_data))
+        unseen_new_data = unseen_new_data[
+            ((new_data["time_offset"] >= global_tof_min) & (new_data["time_offset"] <= global_tof_max))
+        ]
+        self.unseen_new_data = unseen_new_data
+        # if there's a non-zero trigger_rate in unseen_new_data, update self.trigger_rate
+        if not unseen_new_data.empty and "trigger_rate" in unseen_new_data.columns:
+            # Use the last nonzero trigger_rate found
+            last_trigger_rate_series = unseen_new_data[unseen_new_data["trigger_rate"] != 0]["trigger_rate"]
+            if not last_trigger_rate_series.empty:
+                self.trigger_rate = last_trigger_rate_series.iloc[-1]
         # Update hist, etc.
+        self.historical_data = pd.concat([self.historical_data, unseen_new_data]).tail(TOTAL_MAX_POINTS)
+
         self._update_tof_statistics(unseen_new_data)
-        self._update_historical_data(unseen_new_data)
 
-    def plot_events_over_time(self, max_points=MAX_POINTS_FOR_PLOT, roll=10):
-        """
-        Plot the rolling rate in "counts per second" rather than raw n_events.
-        We'll do something like: rate(t_i) = n_events(i) / (time(i) - time(i-1))
-        then a rolling average over 'roll' points.
-        """
-        fig = go.Figure()
-        df = self.historical_data[['time','n_events']].copy()
-        if len(df) < 2:
+    def plot_events_over_time(self, max_points=100, yaxis_range=None,
+                              show_rolling_average=False, rolling_window_size=100):
+        try:
+            fig = go.Figure()
+            
+
+            df = self.historical_data.copy().drop_duplicates(subset=["bunch"])
+            if len(df) == 0:
+                return fig
+            
+            events_per_trigger = df["n_events"].values
+            trigger_rate = df["trigger_rate"].values
+            
+            events_per_second = events_per_trigger * trigger_rate
+
+            df["id_timestamp"] = pd.to_datetime(df["id_timestamp"], unit="s")
+            times_events = df["id_timestamp"].values
+            
+            # If the last event was more than 1 second ago, add a dummy point with 0 events
+            if time.time() - self.last_loaded_time > 1.0:
+                times_events = np.append(times_events, times_events[-1] + np.timedelta64(1, 's'))
+                events_per_second = np.append(events_per_second, 0)
+
+            fig.add_trace(
+                go.Scatter(
+                    x=times_events,
+                    y=events_per_second,
+                    mode="lines",
+                    name="Events per second",
+                    line=dict(color="blue"),
+                )
+            )
+
             fig.update_layout(
-                xaxis_title="Time (s)",
-                yaxis_title="Counts/sec",
+                xaxis_title="Monitoring Time (s)",
+                yaxis_title="Total Events/s",
                 template="plotly_white",
-                uirevision='events_over_time'
+                uirevision="events_over_time",
             )
+
+            if yaxis_range is not None:
+                fig.update_yaxes(range=yaxis_range)
+
             return fig
-
-        # Convert time to float seconds
-        df['t_s'] = df['time'].apply(lambda x: x.timestamp())
-        df.sort_values('t_s', inplace=True)
-
-        # compute delta_t
-        df['delta_t'] = df['t_s'].diff().fillna(0)
-        df['delta_t'] = df['delta_t'].clip(lower=1e-9)  # avoid /0
-
-        # instantaneous rate = n_events / delta_t
-        df['rate_cps'] = df['n_events'] / df['delta_t']
-
-        # keep only last N points
-        if len(df) > max_points:
-            df = df.iloc[-max_points:]
-
-        # rolling average
-        df['rate_cps_roll'] = df['rate_cps'].rolling(roll, min_periods=1).mean()
-
-        # shift time so x=0 is the first measurement
-        df['plot_t'] = df['t_s'] - df['t_s'].iloc[0]
-
-        fig.add_trace(
-            go.Scatter(
-                x=df['plot_t'],
-                y=df['rate_cps_roll'],
-                mode="lines",
-                name=f"Rolling {roll}",
-                line=dict(color="red")
-            )
-        )
-
-        fig.update_layout(
-            xaxis_title="Time Since Start (s)",
-            yaxis_title="Counts / second",
-            template="plotly_white",
-            uirevision='events_over_time'
-        )
-        return fig
-
+        except Exception as e:
+            print(f"Error in plot_events_over_time: {e}")
+            return go.Figure()
+        
     def plot_tof_histogram(self):
         # same as your original, except we keep it consistent
         fig = go.Figure()
@@ -254,24 +259,20 @@ class PlotGenerator:
         return fig
 
     def plot_rate_vs_wavenumber_2d_histogram(self):
-        """
-        Rate vs wavenumber, as in your original code. 
-        """
         if self.historical_data.empty:
             return go.Figure()
 
-        df = self.historical_data.dropna(subset=['wn_1','time'])
-        df['t_s'] = df['time'].apply(lambda x: x.timestamp())
+        df = self.historical_data.copy()
+        df['t_s'] = df['_time'].apply(lambda x: x.timestamp())
         df.sort_values('t_s', inplace=True)
-        df['time_diff'] = df['t_s'].shift(-1) - df['t_s']
+        df['_time_diff'] = df['t_s'].shift(-1) - df['t_s']
         if len(df) > 1:
-            df.at[df.index[-1], 'time_diff'] = df['time_diff'].iloc[-2]
+            df.at[df.index[-1], '_time_diff'] = df['_time_diff'].iloc[-2]
         else:
-            df.at[df.index[-1], 'time_diff'] = 0
-        df['time_diff'] = df['time_diff'].clip(lower=1e-9)
+            df.at[df.index[-1], '_time_diff'] = 0
+        df['_time_diff'] = df['_time_diff'].clip(lower=1e-9)
 
-        # pick one wn channel, e.g. wn_1
-        wn_col = 'wn_1'
+        wn_col = CHANNEL_USED
         wn_min, wn_max = df[wn_col].min(), df[wn_col].max()
         wn_range = wn_max - wn_min
         if self.wn_bin_width_cm1 == 0:
@@ -284,7 +285,7 @@ class PlotGenerator:
 
         grouped = df.groupby('wn_bin')
         total_events = grouped['n_events'].sum()
-        total_time   = grouped['time_diff'].sum()
+        total_time   = grouped['_time_diff'].sum()
 
         mask_nz = total_time > 0
         total_events = total_events[mask_nz]
@@ -322,7 +323,7 @@ class PlotGenerator:
             return go.Figure()
 
         df_events = self.historical_data.query("channel != -1")
-        wn_col = 'wn_1'
+        wn_col = CHANNEL_USED
         fig = px.density_heatmap(
             df_events,
             x=wn_col,
@@ -341,35 +342,32 @@ class PlotGenerator:
         return fig
 
 
+# --------------------------------------------------------------------------------
+# Query to fetch data from InfluxDB
+# --------------------------------------------------------------------------------
 def query_influxdb(minus_time_str, measurement_name):
-    query = f'''
+    query = f"""
     from(bucket: "{INFLUXDB_BUCKET}")
-      |> range(start: {minus_time_str})
-      |> filter(fn: (r) => r._measurement == "tagger_data")
-      |> filter(fn: (r) => r.type == "{measurement_name}")
-      |> tail(n: {NBATCH})
-      |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
-      |> keep(columns: ["_time","bunch","n_events","channel","time_offset","timestamp_str","wn_1","wn_2","wn_3","wn_4","voltage"])
-    '''
+    |> range(start: {minus_time_str})
+    |> filter(fn: (r) => r._measurement == "hits")
+    |> filter(fn: (r) => r.type == "{measurement_name}")
+    |> tail(n: {NBATCH})
+    |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
+    |> keep(columns: ["_time", "bunch", "n_events", "channel", "time_offset", "id_timestamp", "wn_1", "wn_2", "wn_3", "wn_4", "voltage", "trigger_rate"])
+    """
     try:
         result = client.query_api().query(query=query, org=INFLUXDB_ORG)
         records = []
         for table in result:
             for record in table.records:
                 records.append(record.values)
-        df = pd.DataFrame(records).dropna(subset=['_time'])
-        df = df.rename(columns={'_time': 'time','timestamp_str':'timestamp'})
-        df['time'] = pd.to_datetime(df['time'])
-        column_order = ['time','bunch','n_events','channel','time_offset','timestamp','wn_1','wn_2','wn_3','wn_4','voltage']
-        for col in column_order:
-            if col not in df.columns:
-                df[col] = np.nan
-        return df[column_order]
+        df = pd.DataFrame(records).dropna(how="all")
+        return df
     except Exception as e:
         print(f"Error querying InfluxDB: {e}")
         return pd.DataFrame(columns=[
-            'time','bunch','n_events','channel','time_offset',
-            'timestamp','wn_1','wn_2','wn_3','wn_4','voltage'
+            "_time", "bunch", "n_events", "channel", "time_offset", "id_timestamp",
+            "wn_1", "wn_2", "wn_3", "wn_4", "voltage", "trigger_rate"
         ])
 
 
@@ -611,7 +609,7 @@ def update_wn_histogram_settings(n_clicks, wn_bin_width_mhz):
         Input('update-wn-histogram', 'n_clicks')
     ]
 )
-def update_plots(n_intervals, clear_clicks, events_roll, *_):
+def update_plots(n_intervals, clear_clicks, *_):
     global viz_tool, global_tof_min, global_tof_max
     ctx = dash.callback_context
 
@@ -628,19 +626,23 @@ def update_plots(n_intervals, clear_clicks, events_roll, *_):
     # 1) Query new data from Influx
     file_location = load_path()["saving_file"]
     measurement_name = os.path.basename(file_location).split("scan_")[-1].split(".")[0]
-    # We'll interpret the measurement_name's date/time to pass as start
-    # E.g. 2025_01_17_14_33_42 => "2025-01-17T14:33:42Z"
-    # Or just pass a large range so we pick up everything
     minus_time_str = f"0"  # Start from the beginning, or you can parse measurement_name if you want
     new_data = query_influxdb(minus_time_str, measurement_name)
 
+    if new_data.empty and len(viz_tool.historical_data) == 0:
+        return (
+            go.Figure(),
+            go.Figure(),
+            go.Figure(),
+            go.Figure(),
+            [dbc.Col("No data available yet.", width=12)],
+        )
+        
     with cache_lock:
-        # 2) Update the data aggregator
         viz_tool.update_content(new_data)
 
-        # 3) Generate updated figures
         fig_total_counts_vs_wavenumber = viz_tool.plot_rate_vs_wavenumber_2d_histogram()
-        fig_events_over_time = viz_tool.plot_events_over_time(roll=events_roll)
+        fig_events_over_time = viz_tool.plot_events_over_time()
         fig_3d_tof_vs_rw = viz_tool.plot_3d_tof_rw()
         fig_tof_histogram = viz_tool.plot_tof_histogram()
 
@@ -649,8 +651,8 @@ def update_plots(n_intervals, clear_clicks, events_roll, *_):
         status_text = "Status: Offline"
         time_since_last_event = 9999
         if not viz_tool.historical_data.empty:
-            if 'time' in viz_tool.historical_data.columns:
-                tmax = viz_tool.historical_data['time'].max()
+            if '_time' in viz_tool.historical_data.columns:
+                tmax = viz_tool.historical_data['_time'].max()
                 time_since_last_event = time.time() - tmax.timestamp()
                 if time_since_last_event < 1.0:
                     status_color = "green"
@@ -660,8 +662,8 @@ def update_plots(n_intervals, clear_clicks, events_roll, *_):
             bunch_count = len(viz_tool.historical_data['bunch'].unique())
             total_events = viz_tool.total_events
             scan_id = measurement_name
-            if 'time' in viz_tool.historical_data.columns:
-                time_span = viz_tool.historical_data['time'].max() - viz_tool.historical_data['time'].min()
+            if '_time' in viz_tool.historical_data.columns:
+                time_span = viz_tool.historical_data['_time'].max() - viz_tool.historical_data['_time'].min()
                 running_time = round(time_span.total_seconds(),2)
             else:
                 running_time = 0

@@ -119,12 +119,12 @@ def main_loop(tagger, data_name, voltage_reader, wavenumber_reader):
             wavenumbers = wavenumber_reader.get_wavenumbers()
             delta_t_total = time_now - i_time
             try:
-                trigger_rate = total_triggers / (delta_t_total)
+                trigger_rate = new_triggers[-1][0] / (delta_t_total)
             except ZeroDivisionError:
                 trigger_rate = 0.000
             write_to_influxdb(new_events, data_name, voltage, wavenumbers, trigger_rate = trigger_rate)
-            total_triggers += len_triggers
-        time.sleep(0.2)
+            # total_triggers += len_triggers
+        time.sleep(0.1)
 
 if __name__ == "__main__":
     refresh_rate, is_scanning, voltage_port = process_input_args()
