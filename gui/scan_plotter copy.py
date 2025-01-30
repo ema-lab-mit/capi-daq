@@ -298,11 +298,11 @@ class PlotGenerator:
     def plot_rate_vs_wavenumber_2d_histogram(self):
         """
         An upgraded, more robust method for plotting event rate vs. wavenumber.
-        
-        We add error bars (standard error of the mean) to each bin:
-          SEM = std / sqrt(N)
-        where std is the sample standard deviation in that bin 
-        and N is the number of points in that bin.
+
+        Instead of summing n_events and dividing by the sum of time intervals,
+        each row is assigned a 'local_rate' = n_events * trigger_rate.
+        Then we bin those local rates by wavenumber and take an average 
+        (or another robust statistic, e.g., median).
         """
         if self.historical_data.empty:
             return go.Figure()
@@ -312,7 +312,6 @@ class PlotGenerator:
         if df.empty:
             return go.Figure()
         
-        # Each row's local rate
         df["local_rate"] = df["n_events"] * df["trigger_rate"]
         
         wn_col = CHANNEL_USED  # e.g. 'wn_3'
@@ -329,31 +328,24 @@ class PlotGenerator:
         bin_edges = np.linspace(wn_min, wn_max, bins + 1)
         df["wn_bin"] = pd.cut(df[wn_col], bin_edges)
         
-        # We compute mean, count, and std per bin
-        grouped = df.groupby("wn_bin")["local_rate"].agg(["mean", "count", "std"])
-        
-        # Standard error of the mean
-        grouped["sem"] = grouped["std"] / np.sqrt(grouped["count"])
-        grouped["sem"] = grouped["sem"].fillna(0)  # replace NaNs with 0 if any
+        grouped = df.groupby("wn_bin")["local_rate"].agg(["mean", "count"])
         
         # Build a plotting DataFrame
         bin_mids = np.array([interval.mid for interval in grouped.index])
         plot_df = pd.DataFrame({
             "wn_mid": bin_mids - self.wn_offset, 
             "rate": grouped["mean"],
-            "count": grouped["count"],
-            "rate_sem": grouped["sem"]
+            "count": grouped["count"]
         }).dropna(subset=["rate"])  # remove bins with no data
         
         if plot_df.empty:
             return go.Figure()
         
-        # Create Plotly figure with error bars
+        # Create Plotly figure
         fig = px.scatter(
             plot_df,
             x="wn_mid",
             y="rate",
-            error_y="rate_sem",             # <-- ADDING ERROR BARS HERE
             template="plotly_white",
             title="Event Rate vs λ",
             labels={"wn_mid": "λ (cm⁻¹)", "rate": "Estimated Rate (events/s)"}
@@ -372,6 +364,7 @@ class PlotGenerator:
             uirevision='rate_vs_wavenumber'
         )
         return fig
+
 
     def plot_3d_tof_rw(self):
         """
@@ -727,4 +720,4 @@ def update_plots(n_intervals, clear_clicks, *_):
     )
 
 if __name__ == '__main__':
-    app.run_server(debug=False, port=8050)
+    app.run_server(debug=True, port=8050)

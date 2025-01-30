@@ -1,1 +1,1 @@
-{"saving_folder": "D:\\NewData", "saving_file": "D:\\NewData\\monitor_2025_01_26_18_09_49.parquet", "tof_start": "0.5e-6", "tof_end": "150e-6", "pv_name": "wavenumber_3", "channel_level": "-0.4", "trigger_level": "-0.4", "data_format": "parquet", "id_counter": "0"}
+{"saving_folder": "D:\\NewData\\Si", "saving_file": "D:\\NewData\\Si\\scan_2025_01_29_23_46_50.csv", "tof_start": "0.5e-6", "tof_end": "40e-6", "pv_name": "wavenumber_3", "channel_level": "-0.4", "trigger_level": "-0.4", "data_format": "csv", "id_counter": "0"}

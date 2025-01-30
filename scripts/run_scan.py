@@ -12,6 +12,17 @@ from influxdb_client.client.write_api import SYNCHRONOUS
 import serial
 import logging
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler("daq.log")  # Optional: Log to a file
+    ]
+)
+logger = logging.getLogger(__name__)
+
 # Import PyArrow removed as it's no longer needed for CSV
 # import pyarrow as pa
 # import pyarrow.parquet as pq
@@ -55,7 +66,7 @@ def get_card_settings(settings_path=SETTINGS_PATH):
             "saving_file": settings.get("saving_file", "data.csv"),  # Changed default to 'data.csv'
         }
     except Exception as e:
-        print(f"Error loading settings: {e}")
+        logger.error(f"Error loading settings: {e}")
         return {}
 
 modified_settings = get_card_settings()
@@ -74,7 +85,7 @@ initialization_params = {
         "starts": [int(time_to_flops(INIT_TIME)) for _ in range(4)],
         "stops": [int(time_to_flops(STOP_TIME_WINDOW)) for _ in range(4)],
     },
-    "refresh_rate": 0.2,
+    "refresh_rate": 0.5,
 }
 
 # Initialize InfluxDB Client
@@ -95,8 +106,9 @@ def write_to_influxdb(data, data_name, voltage, wavenumbers, trigger_rate):
         points += [Point("hits").tag("type", data_name).field(f"wn_{i}", wavenumbers[i-1]).time(data_ingestion, WritePrecision.NS) for i in range(1, 5)]
     try:
         write_api.write(bucket=INFLUXDB_BUCKET, record=points)
+        logger.info(f"Written {len(points)} points to InfluxDB.")
     except Exception as e:
-        print(f"Error writing to InfluxDB: {e}")
+        logger.error(f"Error writing to InfluxDB: {e}")
 
 def process_input_args():
     parser = argparse.ArgumentParser()
@@ -119,18 +131,10 @@ def write_to_file(saving_file):
     Writes data batches from the queue to a CSV file efficiently and safely.
     Ensures that headers are written only once and handles file flushing to prevent corruption.
     """
-    # Define the CSV headers
-    headers = [
-        "bunch", "n_events", "channel", "time_offset",
-        "id_timestamp", "voltage", "wn_1", "wn_2", "wn_3", "wn_4"
-    ]
-
-    # Determine if the file exists and is non-empty to decide on writing headers
     file_exists = os.path.isfile(saving_file)
     write_header = not file_exists or os.path.getsize(saving_file) == 0
 
     try:
-        # Open the file in append mode with buffering
         with open(saving_file, 'a', newline='', buffering=1) as file:
             while not stop_event.is_set() or not data_queue.empty():
                 try:
@@ -138,21 +142,7 @@ def write_to_file(saving_file):
                     if not data_batch:
                         continue
 
-                    df = pd.DataFrame(data_batch, columns=headers)
-
-                    # Enforce data types
-                    df = df.astype({
-                        "bunch": 'Int64',
-                        "n_events": 'Int64',
-                        "channel": 'Int64',
-                        "time_offset": 'float64',
-                        "id_timestamp": 'string',
-                        "voltage": 'float64',
-                        "wn_1": 'float64',
-                        "wn_2": 'float64',
-                        "wn_3": 'float64',
-                        "wn_4": 'float64'
-                    })
+                    df = pd.DataFrame(data_batch)
 
                     # Write to CSV
                     df.to_csv(
@@ -160,22 +150,20 @@ def write_to_file(saving_file):
                         header=write_header,
                         index=False,
                         mode='a',
-                        line_terminator='\n'
+                        lineterminator='\n'
                     )
 
-                    # After the first write, headers are no longer needed
                     if write_header:
                         write_header = False
 
-                    # Ensure data is written to disk
                     file.flush()
                     os.fsync(file.fileno())
 
-                    print(f"Wrote batch of size {len(data_batch)} to {saving_file}")
+                    logger.info(f"Wrote batch of size {len(data_batch)} to {saving_file}")
                 except queue.Empty:
                     continue
                 except Exception as e:
-                    print(f"Error writing to CSV file: {e}")
+                    logger.error(f"Error writing to CSV file: {e}")
 
             # Handle any remaining data after stop_event is set
             while not data_queue.empty():
@@ -184,47 +172,31 @@ def write_to_file(saving_file):
                     if not data_batch:
                         continue
 
-                    df = pd.DataFrame(data_batch, columns=headers)
+                    df = pd.DataFrame(data_batch)
+                    df = df
 
-                    # Enforce data types
-                    df = df.astype({
-                        "bunch": 'Int64',
-                        "n_events": 'Int64',
-                        "channel": 'Int64',
-                        "time_offset": 'float64',
-                        "id_timestamp": 'string',
-                        "voltage": 'float64',
-                        "wn_1": 'float64',
-                        "wn_2": 'float64',
-                        "wn_3": 'float64',
-                        "wn_4": 'float64'
-                    })
-
-                    # Write to CSV
                     df.to_csv(
                         file,
                         header=write_header,
                         index=False,
                         mode='a',
-                        line_terminator='\n'
+                        lineterminator='\n'
                     )
 
-                    # After the first write, headers are no longer needed
                     if write_header:
                         write_header = False
 
-                    # Ensure data is written to disk
                     file.flush()
                     os.fsync(file.fileno())
 
-                    print(f"Wrote final batch of size {len(data_batch)} to {saving_file}")
+                    logger.info(f"Wrote final batch of size {len(data_batch)} to {saving_file}")
                 except Exception as e:
-                    print(f"Error writing final data to CSV file: {e}")
+                    logger.error(f"Error writing final data to CSV file: {e}")
 
     except Exception as e:
-        print(f"Error initializing CSV file writer: {e}")
+        logger.error(f"Error initializing CSV file writer: {e}")
 
-    print(f"Closed CSV writer for {saving_file}")
+    logger.info(f"Closed CSV writer for {saving_file}")
 
 def main_loop(tagger, measurement_name, voltage_reader, wavenumber_reader, initialization_params=initialization_params):
     """
@@ -239,7 +211,11 @@ def main_loop(tagger, measurement_name, voltage_reader, wavenumber_reader, initi
     i_time = time.time()
     while not stop_event.is_set():
         now_str = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.%fZ')
-        data, new_triggers, new_events = tagger.get_data(return_splitted=True)
+        try:
+            data, new_triggers, new_events = tagger.get_data(return_splitted=True)
+        except Exception as e:
+            logger.error(f"Error getting data from Tagger: {e}")
+            data, new_triggers, new_events = [], [], []
         time_now = time.time()
         if len(new_triggers) > 0:
             voltage = voltage_reader.get_voltage()
@@ -266,7 +242,7 @@ def main_loop(tagger, measurement_name, voltage_reader, wavenumber_reader, initi
                         data_queue.put(batched_data, timeout=1)
                         batched_data = []
                     except queue.Full:
-                        print("Data queue is full on batch data put.")
+                        logger.warning("Data queue is full on batch data put.")
         time.sleep(initialization_params["refresh_rate"])
 
     # Final flush before exit
@@ -275,9 +251,9 @@ def main_loop(tagger, measurement_name, voltage_reader, wavenumber_reader, initi
             data_queue.put(batched_data, timeout=1)
             write_to_influxdb(batched_data, measurement_name, voltage, wavenumbers, trigger_rate=trigger_rate)
     except queue.Full:
-        print("Data queue is full on final data put.")
+        logger.warning("Data queue is full on final data put.")
     except Exception as e:
-        print(f"Error during final data put: {e}")
+        logger.error(f"Error during final data put: {e}")
 
 if __name__ == "__main__":
     refresh_rate, is_scanning, voltage_port = process_input_args()
@@ -300,17 +276,19 @@ if __name__ == "__main__":
     voltage_reader.start()
     wavenumber_reader.start()
 
-    # Start CSV writer in background
-    writer_thread = threading.Thread(target=write_to_file, args=(save_path,), daemon=True)
+    # Start CSV writer in background (non-daemon)
+    writer_thread = threading.Thread(target=write_to_file, args=(save_path,))
     writer_thread.start()
 
     try:
         main_loop(tagger, measurement_name, voltage_reader, wavenumber_reader, initialization_params)
     except KeyboardInterrupt:
-        print("KeyboardInterrupt received. Stopping DAQ.")
+        logger.info("KeyboardInterrupt received. Stopping DAQ.")
     finally:
         stop_event.set()
         voltage_reader.stop()
         wavenumber_reader.stop()
-        writer_thread.join()
-        print("DAQ stopped gracefully.")
+        writer_thread.join()  # Wait for writer_thread to finish
+        voltage_reader.join()  # Wait for VoltageReader to finish
+        wavenumber_reader.join()  # Wait for WavenumberReader to finish
+        logger.info("DAQ stopped gracefully.")
