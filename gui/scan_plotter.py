@@ -134,10 +134,11 @@ class PlotGenerator:
         else:
             unseen_new_data = new_data
         
-        unseen_new_data = unseen_new_data[
-            ((new_data["time_offset"] >= global_tof_min) & (new_data["time_offset"] <= global_tof_max))
-        ]
-        self.unseen_new_data = unseen_new_data
+        if not unseen_new_data.empty:
+            unseen_new_data = unseen_new_data[
+                ((new_data["time_offset"] >= global_tof_min) & (new_data["time_offset"] <= global_tof_max))
+            ]
+            self.unseen_new_data = unseen_new_data
         
         if not unseen_new_data.empty and "trigger_rate" in unseen_new_data.columns:
             # Use the last nonzero trigger_rate found
@@ -313,7 +314,7 @@ class PlotGenerator:
             return go.Figure()
         
         # Each row's local rate
-        df["local_rate"] = df["n_events"] * df["trigger_rate"]
+        df["local_rate"] = df["event_rate"]
         
         wn_col = CHANNEL_USED  # e.g. 'wn_3'
         wn_min, wn_max = df[wn_col].min(), df[wn_col].max()
@@ -411,7 +412,7 @@ def query_influxdb(minus_time_str, measurement_name):
     |> filter(fn: (r) => r.type == "{measurement_name}")
     |> tail(n: {NBATCH})
     |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
-    |> keep(columns: ["_time", "bunch", "n_events", "channel", "time_offset", "id_timestamp", "wn_1", "wn_2", "wn_3", "wn_4", "voltage", "trigger_rate"])
+    |> keep(columns: ["_time", "bunch", "n_events", "channel", "time_offset", "id_timestamp", "wn_1", "wn_2", "wn_3", "wn_4", "voltage", "trigger_rate", "event_rate"])
     """
     try:
         result = client.query_api().query(query=query, org=INFLUXDB_ORG)
@@ -425,9 +426,8 @@ def query_influxdb(minus_time_str, measurement_name):
         print(f"Error querying InfluxDB: {e}")
         return pd.DataFrame(columns=[
             "_time", "bunch", "n_events", "channel", "time_offset", "id_timestamp",
-            "wn_1", "wn_2", "wn_3", "wn_4", "voltage", "trigger_rate"
+            "wn_1", "wn_2", "wn_3", "wn_4", "voltage", "trigger_rate", "event_rate"
         ])
-
 
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
 
@@ -716,6 +716,9 @@ def update_plots(n_intervals, clear_clicks, *_):
             dbc.Col(f"Voltage: {last_voltage:.5f} V", width=2),
             dbc.Col(f"Scan ID: {scan_id}", width=2),
             dbc.Col(f"λ [{CHANNEL_USED}]: {viz_tool.last_wavenumber} cm⁻¹", width=2),
+            dbc.Col(f"Trigger Rate: {getattr(viz_tool, 'trigger_rate', 0):.2f} Hz", width=2),
+            dbc.Col(f"Event Rate: {viz_tool.historical_data['event_rate'].iloc[-1]:.2f} Hz", width=2),
+            dbc.Col(f"Spectrum Peak: {viz_tool.historical_data['spectr_peak'].values[-1]} Hz", width=2),
         ]
 
     return (

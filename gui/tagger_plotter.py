@@ -33,7 +33,7 @@ SETTINGS_PATH = "C:\\Users\\EMALAB\\Desktop\\TW_DAQ\\fast_tagger_gui\\settings.j
 # --------------------------------------------------------------------------------
 default_settings = {
     "tof_hist_nbins": 100,
-    "tof_hist_min": 1e-6,   # 1 microsecond
+    "tof_hist_min": 0,#1e-6,   # 1 microsecond
     "tof_hist_max": 150e-6, # 150 microseconds
     "plot_rolling_window": 10,
     "integration_window": 10,
@@ -44,7 +44,7 @@ default_settings = {
 try:
     with open(SETTINGS_PATH, 'r') as f:
         user_settings = json.load(f)
-        default_settings["tof_hist_min"] = float(user_settings.get("tof_hist_min", default_settings["tof_hist_min"]))
+        default_settings["tof_hist_min"] = 0#float(user_settings.get("tof_hist_min", default_settings["tof_hist_min"]))
         default_settings["tof_hist_max"] = float(user_settings.get("tof_hist_max", default_settings["tof_hist_max"]))
         print("UPDATED tof SETTINGS_PATH")
 except Exception as e:  
@@ -85,7 +85,7 @@ class PlotGenerator:
         self.settings_dict = settings_dict
         self.init_time = time.time()
         self.tof_hist_nbins = settings_dict.get("tof_hist_nbins", 100)
-        self.tof_hist_min = settings_dict.get("tof_hist_min", 1e-6)
+        self.tof_hist_min = settings_dict.get("tof_hist_min", 0e-6)
         self.tof_hist_max = settings_dict.get("tof_hist_max", 150e-6)
         self.plot_rolling_window = settings_dict.get("plot_rolling_window", 10)
         self.integration_window = settings_dict.get("integration_window", 10)
@@ -156,10 +156,12 @@ class PlotGenerator:
             unseen_new_data = new_data
 
         # Filter time_offset by global tof settings
-        unseen_new_data = unseen_new_data[
-            ((new_data["time_offset"] >= global_tof_min) & (new_data["time_offset"] <= global_tof_max))
-        ]
+        if not unseen_new_data.empty:
+            unseen_new_data = unseen_new_data[
+                ((new_data["time_offset"] >= global_tof_min) & (new_data["time_offset"] <= global_tof_max))
+            ]
         self.unseen_new_data = unseen_new_data
+        # print("Got new data", len(self.unseen_new_data), "events")
 
         # Update trigger_rate if available
         if not unseen_new_data.empty and "trigger_rate" in unseen_new_data.columns:
@@ -175,7 +177,7 @@ class PlotGenerator:
             # Insert dummy if no new points to keep times updating
             dummy_data = pd.DataFrame(
                 {
-                    "bunch": [self.historical_data["bunch"].values[-1] if not self.historical_data.empty else 0],
+                    "bunch": [self.padded_historical_data["bunch"].values[-1] + 1 if not self.historical_data.empty else 0],
                     "n_events": [0],
                     "time_offset": [0],
                     "id_timestamp": [self.padded_historical_data["id_timestamp"].values[-1] + 0.5],
@@ -184,7 +186,7 @@ class PlotGenerator:
             )
             self.padded_historical_data = pd.concat([self.padded_historical_data, dummy_data]).tail(2_000)
         else:
-            self.padded_historical_data = pd.concat([self.padded_historical_data, unseen_new_data]).tail(2_000)
+            self.padded_historical_data = pd.concat([self.padded_historical_data, unseen_new_data.drop_duplicates(subset=["bunch"])]).tail(2_000)
 
         self._update_tof_statistics(unseen_new_data)
         self.historical_data = self.historical_data.drop_duplicates(subset=["id_timestamp"])
@@ -208,7 +210,7 @@ class PlotGenerator:
             df["id_timestamp"] = pd.to_datetime(df["id_timestamp"], unit="s")
             df.set_index("id_timestamp", inplace=True)
 
-            events_per_second = df["n_events"].resample("S").sum()
+            events_per_second = df["n_events"].resample("1S").sum()
             times = events_per_second.index
             nevents = events_per_second.values
 
@@ -222,10 +224,8 @@ class PlotGenerator:
                 )
             )
 
-            if show_rolling_average and rolling_window_size > 1:
-                rolling_avg = np.convolve(
-                    nevents, np.ones(rolling_window_size) / rolling_window_size, mode="same"
-                )
+            if show_rolling_average and rolling_window_size > 1 and len(events_per_second) >= rolling_window_size:
+                rolling_avg = np.convolve(nevents, np.ones(rolling_window_size) / rolling_window_size, mode="valid")
                 fig.add_trace(
                     go.Scatter(
                         x=pd.to_datetime(times),
@@ -510,7 +510,7 @@ def query_influxdb(minus_time_str, measurement_name):
     |> filter(fn: (r) => r.type == "{measurement_name}")
     |> tail(n: {NBATCH})
     |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
-    |> keep(columns: ["_time", "bunch", "n_events", "channel", "time_offset", "id_timestamp", "wn_1", "wn_2", "wn_3", "wn_4", "voltage", "trigger_rate"])
+    |> keep(columns: ["_time", "bunch", "n_events", "channel", "time_offset", "id_timestamp", "wn_1", "wn_2", "wn_3", "wn_4", "voltage", "spectr_peak", "trigger_rate", "event_rate"])
     """
     try:
         result = client.query_api().query(query=query, org=INFLUXDB_ORG)
@@ -524,7 +524,7 @@ def query_influxdb(minus_time_str, measurement_name):
         print(f"Error querying InfluxDB: {e}")
         return pd.DataFrame(columns=[
             "_time", "bunch", "n_events", "channel", "time_offset", "id_timestamp",
-            "wn_1", "wn_2", "wn_3", "wn_4", "voltage", "trigger_rate"
+            "wn_1", "wn_2", "wn_3", "wn_4", "voltage", "spectr_peak", "trigger_rate", "event_rate"
         ])
 
 
@@ -989,6 +989,8 @@ def update_plots(
             dbc.Col(f"λ: {round(last_wn, 6)}", width=2),
             dbc.Col(f"Voltage: {round(last_voltage, 4)} V", width=2),
             dbc.Col(f"Bunching Rate: {viz_tool.trigger_rate:.2f} Hz", width=2),
+            dbc.Col(f"Event Rate: {viz_tool.historical_data['event_rate'].values[-1]:.2f} Hz", width=2),
+            dbc.Col(f"Spectrum Peak: {viz_tool.historical_data['spectr_peak'].values[-1]} Hz", width=2),
         ]
 
     # Preserve state
@@ -1033,4 +1035,4 @@ def export_data(n_clicks):
 
 
 if __name__ == "__main__":
-    app.run_server(debug=True)
+    app.run_server(debug=False)

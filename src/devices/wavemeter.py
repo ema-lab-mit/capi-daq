@@ -30,3 +30,10 @@ class WavenumberReader(threading.Thread):
     
     def get_wavenumbers(self):
         return self.wavenumbers
+    
+if __name__ == "__main__":
+    reader = WavenumberReader()
+    reader.start()
+    time.sleep(0.5)
+    reader.stop()
+    print("Spectrum:", reader.wavenumbers)
