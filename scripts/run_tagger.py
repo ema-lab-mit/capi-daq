@@ -79,16 +79,16 @@ def write_to_influxdb(data, data_name, voltage, wavenumbers, spectr, trigger_rat
     print("Read spectr", spectr, type(spectr))
     for d in data:
         data_ingestion = datetime.fromtimestamp(d[-1])#.strftime()
-        points.append(Point("hits").tag("type", data_name).field("bunch", d[0]).time(data_ingestion, WritePrecision.NS))
-        points.append(Point("hits").tag("type", data_name).field("n_events", d[1]).time(data_ingestion, WritePrecision.NS))
-        points.append(Point("hits").tag("type", data_name).field("channel", d[2]).time(data_ingestion, WritePrecision.NS))
-        points.append(Point("hits").tag("type", data_name).field("time_offset", float(d[3])).time(data_ingestion, WritePrecision.NS))
-        points.append(Point("hits").tag("type", data_name).field("id_timestamp", d[4]).time(data_ingestion, WritePrecision.NS))
-        points.append(Point("hits").tag("type", data_name).field("voltage", voltage).time(data_ingestion, WritePrecision.NS))
-        points.append(Point("hits").tag("type", data_name).field("trigger_rate", trigger_rate).time(data_ingestion, WritePrecision.NS))
-        points.append(Point("hits").tag("type", data_name).field("event_rate", event_rate).time(data_ingestion, WritePrecision.NS))
-        points.append(Point("hits").tag("type", data_name).field(f"spectr_peak", str(spectr)).time(data_ingestion, WritePrecision.NS))
-        points += [Point("hits").tag("type", data_name).field(f"wn_{i}", wavenumbers[i-1]).time(data_ingestion, WritePrecision.NS) for i in range(1, 5)]
+        points.append(Point("tagger").tag("type", data_name).field("bunch", d[0]).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("tagger").tag("type", data_name).field("n_events", d[1]).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("tagger").tag("type", data_name).field("channel", d[2]).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("tagger").tag("type", data_name).field("time_offset", float(d[3])).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("tagger").tag("type", data_name).field("id_timestamp", d[4]).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("tagger").tag("type", data_name).field("voltage", voltage).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("tagger").tag("type", data_name).field("trigger_rate", trigger_rate).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("tagger").tag("type", data_name).field("event_rate", event_rate).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("tagger").tag("type", data_name).field(f"spectr_peak", str(spectr)).time(data_ingestion, WritePrecision.NS))
+        points += [Point("tagger").tag("type", data_name).field(f"wn_{i}", wavenumbers[i-1]).time(data_ingestion, WritePrecision.NS) for i in range(1, 5)]
     try:
         write_api.write(bucket=INFLUXDB_BUCKET, record=points)
     except Exception as e:
@@ -114,7 +114,7 @@ def main_loop(tagger, data_name, voltage_reader, wavenumber_reader, spectrometer
     tagger.set_trigger_falling()
     tagger.set_trigger_level(float(TRIGGER_LEVEL))
     tagger.start_reading()
-    event_rate = 0
+    event_rate = 0.
     alpha = 0.2
     i_time = time.time()
     while True:
@@ -123,9 +123,21 @@ def main_loop(tagger, data_name, voltage_reader, wavenumber_reader, spectrometer
         len_triggers = len(new_triggers)
         # total_triggers += len(new_triggers)
         if len_triggers > 0:
-            voltage = voltage_reader.get_voltage()
-            wavenumbers = wavenumber_reader.get_wavenumbers()
-            spectr = (spectrometer_reader.get_spec())
+            try:
+                voltage = voltage_reader.get_voltage()
+            except Exception as e:
+                print(f"Error reading voltage: {e}")
+                voltage = 0.0
+            try:
+                wavenumbers = wavenumber_reader.get_wavenumbers()
+            except Exception as e:
+                print(f"Error reading wavenumbers: {e}")
+                wavenumbers = [0.0, 0.0, 0.0, 0.0]
+            try:
+                spectr = (spectrometer_reader.get_spec())
+            except Exception as e:
+                print(f"Error reading spectrometer: {e}")
+                spectr = "0.0"
             delta_t_total = time_now - i_time
             try:
                 trigger_rate = new_triggers[-1][0] / (delta_t_total)

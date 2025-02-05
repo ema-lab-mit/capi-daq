@@ -83,7 +83,7 @@ class ParameterDialog(QDialog):
         pv_group = QGroupBox("PV Name")
         pv_layout = QFormLayout()
         self.pv_combo = QComboBox()
-        self.pv_combo.addItems(['wavenumber_1', 'wavenumber_2', 'wavenumber_3', 'wavenumber_4'])
+        self.pv_combo.addItems(['wavenumber_1', 'wavenumber_2', 'wavenumber_3', 'wavenumber_4', 'spectr_peak'])
         pv_layout.addRow("PV Name:", self.pv_combo)
         pv_group.setLayout(pv_layout)
         main_layout.addWidget(pv_group)

@@ -44,7 +44,7 @@ default_settings = {
 try:
     with open(SETTINGS_PATH, 'r') as f:
         user_settings = json.load(f)
-        default_settings["tof_hist_min"] = 0#float(user_settings.get("tof_hist_min", default_settings["tof_hist_min"]))
+        default_settings["tof_hist_min"] = float(user_settings.get("tof_hist_min", default_settings["tof_hist_min"]))
         default_settings["tof_hist_max"] = float(user_settings.get("tof_hist_max", default_settings["tof_hist_max"]))
         print("UPDATED tof SETTINGS_PATH")
 except Exception as e:  
@@ -451,7 +451,14 @@ class PlotGenerator:
                             line=dict(color=colors[i % len(colors)]),
                         )
                     )
-
+            fig.add_trace(go.Scatter(
+                x=decimated_df.index,
+                y=decimated_df["spectr_peak"].astype("float"),
+                mode="lines",
+                name=f"Spectrometer",
+            ))
+                
+                
             fig.update_layout(
                 xaxis_title="Time",
                 yaxis_title="Wavenumber",
@@ -506,7 +513,7 @@ def query_influxdb(minus_time_str, measurement_name):
     query = f"""
     from(bucket: "{INFLUXDB_BUCKET}")
     |> range(start: {minus_time_str})
-    |> filter(fn: (r) => r._measurement == "hits")
+    |> filter(fn: (r) => r._measurement == "tagger")
     |> filter(fn: (r) => r.type == "{measurement_name}")
     |> tail(n: {NBATCH})
     |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
@@ -519,6 +526,7 @@ def query_influxdb(minus_time_str, measurement_name):
             for record in table.records:
                 records.append(record.values)
         df = pd.DataFrame(records).dropna(how="all")
+        print(df)
         return df
     except Exception as e:
         print(f"Error querying InfluxDB: {e}")
@@ -984,13 +992,14 @@ def update_plots(
         summary_text = [
             dbc.Col(status_text, style=status_style, width=2),
             dbc.Col(f"Bunch Count: {viz_tool.historical_data['bunch'].values[-1]}", width=2),
+            dbc.Col(f"Events displayed: {len(viz_tool.historical_data)}",  width=2),
             dbc.Col(f"Running Time: {run_time} s", width=2),
             dbc.Col(f"Time since last event: {time_since_last} s", width=2),
             dbc.Col(f"λ: {round(last_wn, 6)}", width=2),
             dbc.Col(f"Voltage: {round(last_voltage, 4)} V", width=2),
             dbc.Col(f"Bunching Rate: {viz_tool.trigger_rate:.2f} Hz", width=2),
             dbc.Col(f"Event Rate: {viz_tool.historical_data['event_rate'].values[-1]:.2f} Hz", width=2),
-            dbc.Col(f"Spectrum Peak: {viz_tool.historical_data['spectr_peak'].values[-1]} Hz", width=2),
+            dbc.Col(f"Spectrum Peak: {float(viz_tool.historical_data['spectr_peak'].values[-1]):.2f} nm", width=2),
         ]
 
     # Preserve state

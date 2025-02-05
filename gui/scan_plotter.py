@@ -357,7 +357,8 @@ class PlotGenerator:
             error_y="rate_sem",             # <-- ADDING ERROR BARS HERE
             template="plotly_white",
             title="Event Rate vs λ",
-            labels={"wn_mid": "λ (cm⁻¹)", "rate": "Estimated Rate (events/s)"}
+            labels={"wn_mid": "λ (cm⁻¹)" if "wn" in CHANNEL_USED else "Spectrum Peack (nm)",
+                    "rate": "Estimated Rate (events/s)"}
         )
         
         # Draw lines + markers for clarity
@@ -368,7 +369,7 @@ class PlotGenerator:
         fig.add_vline(x=last_wn, line=dict(color='red', dash='dash'), name='Last λ')
         
         fig.update_layout(
-            xaxis_title=f"λ (cm⁻¹) + \nOffset: {self.wn_offset} cm⁻¹",
+            xaxis_title=(f"λ (cm⁻¹) + \nOffset: {self.wn_offset} cm⁻¹") if "wn" in CHANNEL_USED else (f"Spectrum Peack (nm) + \nOffset: {self.wn_offset} nm"),
             yaxis_title="Event Rate (events/s)",
             uirevision='rate_vs_wavenumber'
         )
@@ -394,7 +395,7 @@ class PlotGenerator:
             marginal_y="violin"
         )
         fig.update_layout(
-            xaxis_title="λ (cm⁻¹)",
+            xaxis_title="λ (cm⁻¹)" if "wn" in CHANNEL_USED else "Spectrum Peack (nm)",
             yaxis_title="Time of Flight (s)",
             uirevision='rate_vs_wavenumber'
         )
@@ -408,11 +409,11 @@ def query_influxdb(minus_time_str, measurement_name):
     query = f"""
     from(bucket: "{INFLUXDB_BUCKET}")
     |> range(start: {minus_time_str})
-    |> filter(fn: (r) => r._measurement == "hits")
+    |> filter(fn: (r) => r._measurement == "scan")
     |> filter(fn: (r) => r.type == "{measurement_name}")
     |> tail(n: {NBATCH})
     |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
-    |> keep(columns: ["_time", "bunch", "n_events", "channel", "time_offset", "id_timestamp", "wn_1", "wn_2", "wn_3", "wn_4", "voltage", "trigger_rate", "event_rate"])
+    |> keep(columns: ["_time", "bunch", "n_events", "channel", "time_offset", "id_timestamp", "wn_1", "wn_2", "wn_3", "wn_4", "voltage", "spectr_peak", "trigger_rate", "event_rate"])
     """
     try:
         result = client.query_api().query(query=query, org=INFLUXDB_ORG)
@@ -421,12 +422,14 @@ def query_influxdb(minus_time_str, measurement_name):
             for record in table.records:
                 records.append(record.values)
         df = pd.DataFrame(records).dropna(how="all")
+        df["spectr_peak"] = df["spectr_peak"].astype("float")
+        print(df["spectr_peak"])
         return df
     except Exception as e:
         print(f"Error querying InfluxDB: {e}")
         return pd.DataFrame(columns=[
             "_time", "bunch", "n_events", "channel", "time_offset", "id_timestamp",
-            "wn_1", "wn_2", "wn_3", "wn_4", "voltage", "trigger_rate", "event_rate"
+            "wn_1", "wn_2", "wn_3", "wn_4", "voltage", "spectr_peak", "trigger_rate", "event_rate"
         ])
 
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
@@ -718,7 +721,7 @@ def update_plots(n_intervals, clear_clicks, *_):
             dbc.Col(f"λ [{CHANNEL_USED}]: {viz_tool.last_wavenumber} cm⁻¹", width=2),
             dbc.Col(f"Trigger Rate: {getattr(viz_tool, 'trigger_rate', 0):.2f} Hz", width=2),
             dbc.Col(f"Event Rate: {viz_tool.historical_data['event_rate'].iloc[-1]:.2f} Hz", width=2),
-            dbc.Col(f"Spectrum Peak: {viz_tool.historical_data['spectr_peak'].values[-1]} Hz", width=2),
+            dbc.Col(f"Spectrum Peak: {float(viz_tool.historical_data['spectr_peak'].values[-1]):.2f} nm", width=2),
         ]
 
     return (
