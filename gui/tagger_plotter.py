@@ -33,29 +33,24 @@ SETTINGS_PATH = "C:\\Users\\EMALAB\\Desktop\\TW_DAQ\\fast_tagger_gui\\settings.j
 # --------------------------------------------------------------------------------
 default_settings = {
     "tof_hist_nbins": 100,
-    "tof_hist_min": 0,#1e-6,   # 1 microsecond
-    "tof_hist_max": 150e-6, # 150 microseconds
+    "tof_min": 0,#1e-6,   # 1 microsecond
+    "tof_max": 150e-6, # 150 microseconds
     "plot_rolling_window": 10,
     "integration_window": 10,
     "tof_num_gaussians": 1,  # Used if multi-peak is enabled
 }
-
 # Attempt to load user settings
-try:
-    with open(SETTINGS_PATH, 'r') as f:
-        user_settings = json.load(f)
-        default_settings["tof_hist_min"] = float(user_settings.get("tof_hist_min", default_settings["tof_hist_min"]))
-        default_settings["tof_hist_max"] = float(user_settings.get("tof_hist_max", default_settings["tof_hist_max"]))
-        print("UPDATED tof SETTINGS_PATH")
-except Exception as e:  
-    print(f"Error loading user settings: {e}")
-    pass
-
+with open(SETTINGS_PATH, 'r') as f:
+    user_settings = json.load(f)
+    print(user_settings)
 # --------------------------------------------------------------------------------
 # Global parameters and environment variables
 # --------------------------------------------------------------------------------
-global_tof_min = default_settings["tof_hist_min"]
-global_tof_max = default_settings["tof_hist_max"]
+global_tof_min = float(user_settings.get("tof_start", default_settings.get("tof_min")))
+global_tof_max = float(user_settings.get("tof_end", default_settings.get("tof_max")))
+
+default_settings["tof_min"] = global_tof_min
+default_settings["tof_max"] = global_tof_max
 
 db_token = os.getenv("INFLUXDB_TOKEN", "")
 if not db_token:
@@ -85,8 +80,8 @@ class PlotGenerator:
         self.settings_dict = settings_dict
         self.init_time = time.time()
         self.tof_hist_nbins = settings_dict.get("tof_hist_nbins", 100)
-        self.tof_hist_min = settings_dict.get("tof_hist_min", 0e-6)
-        self.tof_hist_max = settings_dict.get("tof_hist_max", 150e-6)
+        self.tof_min = settings_dict.get("tof_min", 0e-6)
+        self.tof_max = settings_dict.get("tof_max", 150e-6)
         self.plot_rolling_window = settings_dict.get("plot_rolling_window", 10)
         self.integration_window = settings_dict.get("integration_window", 10)
 
@@ -108,20 +103,20 @@ class PlotGenerator:
 
         self.tof_mean = 0
         self.tof_var = 0
-        self.tof_histogram_bins = np.linspace(self.tof_hist_min, self.tof_hist_max, self.tof_hist_nbins + 1)
+        self.tof_histogram_bins = np.linspace(self.tof_min, self.tof_max, self.tof_hist_nbins + 1)
         self.histogram_counts = np.zeros(self.tof_hist_nbins)
 
-        self.prev_tof_hist_min = self.tof_hist_min
-        self.prev_tof_hist_max = self.tof_hist_max
+        self.prev_tof_min = self.tof_min
+        self.prev_tof_max = self.tof_max
         self.prev_tof_hist_nbins = self.tof_hist_nbins
         self.trigger_rate = 0  # Start with zero if no data.
 
-    def update_histogram_bins(self, tof_hist_min, tof_hist_max, tof_hist_nbins):
+    def update_histogram_bins(self, tof_min, tof_max, tof_hist_nbins):
         """Update bins only if user changes the slider."""
-        self.tof_hist_min = tof_hist_min
-        self.tof_hist_max = tof_hist_max
+        self.tof_min = tof_min
+        self.tof_max = tof_max
         self.tof_hist_nbins = tof_hist_nbins
-        self.tof_histogram_bins = np.linspace(tof_hist_min, tof_hist_max, tof_hist_nbins + 1)
+        self.tof_histogram_bins = np.linspace(tof_min, tof_max, tof_hist_nbins + 1)
         self.histogram_counts = np.zeros(self.tof_hist_nbins)
 
     def update_num_gaussians(self, n_gaussians):
@@ -430,7 +425,7 @@ class PlotGenerator:
             if len(self.historical_data) == 0:
                 return fig
 
-            df = pd.DataFrame(self.historical_data).copy()
+            df = self.padded_historical_data.copy()
             if df.empty or "_time" not in df.columns:
                 return fig
 
@@ -474,10 +469,10 @@ class PlotGenerator:
         """Plot the voltage over time."""
         try:
             fig = go.Figure()
-            if len(self.historical_data) == 0:
+            if len(self.padded_historical_data) == 0:
                 return fig
 
-            df = self.historical_data.copy().sort_values("_time")
+            df = self.padded_historical_data.sort_values("_time")
             df["_time"] = pd.to_datetime(df["_time"])
             df.set_index("_time", inplace=True)
 
@@ -526,7 +521,6 @@ def query_influxdb(minus_time_str, measurement_name):
             for record in table.records:
                 records.append(record.values)
         df = pd.DataFrame(records).dropna(how="all")
-        print(df)
         return df
     except Exception as e:
         print(f"Error querying InfluxDB: {e}")
@@ -737,8 +731,8 @@ app.layout = dbc.Container(
                             max=200.0,  # Adjusted max or your preference
                             step=0.1,
                             value=[
-                                default_settings["tof_hist_min"] * 1e6, 
-                                default_settings["tof_hist_max"] * 1e6,
+                                default_settings["tof_min"] * 1e6, 
+                                default_settings["tof_max"] * 1e6,
                             ],
                             marks={i: str(i) for i in range(0, 201, 20)},
                         ),

@@ -76,7 +76,6 @@ write_api = client.write_api(write_options=SYNCHRONOUS)
 
 def write_to_influxdb(data, data_name, voltage, wavenumbers, spectr, trigger_rate, event_rate=None):
     points = []
-    print("Read spectr", spectr, type(spectr))
     for d in data:
         data_ingestion = datetime.fromtimestamp(d[-1])#.strftime()
         points.append(Point("tagger").tag("type", data_name).field("bunch", d[0]).time(data_ingestion, WritePrecision.NS))
@@ -146,7 +145,6 @@ def main_loop(tagger, data_name, voltage_reader, wavenumber_reader, spectrometer
             write_to_influxdb(new_events, data_name, voltage, wavenumbers, spectr, trigger_rate = trigger_rate, event_rate=event_rate)
             # total_triggers += len_triggers
             event_rate = ((1 - alpha) * ((len(new_events) * trigger_rate) / len_triggers) + alpha * event_rate) 
-            print(f"Event rate: {event_rate:.2f} Hz")
         time.sleep(0.1)
 
 if __name__ == "__main__":
