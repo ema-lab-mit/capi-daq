@@ -25,11 +25,12 @@ class HP_Multimeter:
     
     def getVoltage(self):
         self.device.write(b"MEAS:VOLT:DC?\n")
-        response = self.device.readline().decode('utf-8').strip('\r\n')
         try:
+            response = self.device.readline().decode('utf-8').strip('\r\n')
             response = float(response)
         except Exception as expn:
-            print('uh oh, exception occurred', expn, response)
+            print('uh oh, exception occurred reading the voltage', expn)
+            response = 0.0
         return response
 
 class VoltageReader(threading.Thread):
@@ -42,8 +43,13 @@ class VoltageReader(threading.Thread):
 
     def run(self):
         while not self.stop_event.is_set():
-            self.voltage = self.multimeter.getVoltage()
-            time.sleep(self.refresh_rate)
+            try:
+                self.voltage = self.multimeter.getVoltage()
+                time.sleep(self.refresh_rate)
+            except Exception as expn:
+                self.voltage = -69419.999999999999
+                time.sleep(self.refresh_rate)
+                
     
     def stop(self):
         self.stop_event.set()

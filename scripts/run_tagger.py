@@ -24,9 +24,10 @@ from fast_tagger_gui.src.system_utils import (
 )
 from fast_tagger_gui.src.devices.multimeter import VoltageReader, HP_Multimeter
 from fast_tagger_gui.src.devices.wavemeter import WavenumberReader
+from fast_tagger_gui.src.devices.spectrometer import SpectrometreReader
 
 SETTINGS_PATH = "C:\\Users\\EMALAB\\Desktop\\TW_DAQ\\fast_tagger_gui\\settings.json"
-POSTING_BATCH_SIZE = 2
+POSTING_BATCH_SIZE = 1
 db_token = get_secrets()
 os.environ["INFLUXDB_TOKEN"] = db_token
 INFLUXDB_URL = "http://localhost:8086"
@@ -67,23 +68,30 @@ initialization_params = {
         "starts": [int(time_to_flops(INIT_TIME)) for _ in range(4)],
         "stops": [int(time_to_flops(STOP_TIME_WINDOW)) for _ in range(4)],
     },
-    "refresh_rate": 0.1,
+    "refresh_rate": 0.5,
 }
 
 client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
 write_api = client.write_api(write_options=SYNCHRONOUS)
 
-def write_to_influxdb(data, data_name, voltage, wavenumbers, timestamp):
+def write_to_influxdb(data, data_name, voltage, wavenumbers, spectr, trigger_rate, event_rate=None):
     points = []
     for d in data:
-        points.append(Point("tagger_data").tag("type", data_name).field("bunch", d[0]).time(timestamp, WritePrecision.NS))
-        points.append(Point("tagger_data").tag("type", data_name).field("n_events", d[1]).time(timestamp, WritePrecision.NS))
-        points.append(Point("tagger_data").tag("type", data_name).field("channel", d[2]).time(timestamp, WritePrecision.NS))
-        points.append(Point("tagger_data").tag("type", data_name).field("time_offset", float(d[3])).time(timestamp, WritePrecision.NS))
-        points.append(Point("tagger_data").tag("type", data_name).field("timestamp", d[4]).time(timestamp, WritePrecision.NS))
-        points.append(Point("tagger_data").tag("type", data_name).field("voltage", voltage).time(timestamp, WritePrecision.NS))
-        points += [Point("tagger_data").tag("type", data_name).field(f"wn_{i}", wavenumbers[i-1]).time(timestamp, WritePrecision.NS) for i in range(1, 5)]
-    write_api.write(bucket=INFLUXDB_BUCKET, record=points)
+        data_ingestion = datetime.fromtimestamp(d[-1])#.strftime()
+        points.append(Point("tagger").tag("type", data_name).field("bunch", d[0]).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("tagger").tag("type", data_name).field("n_events", d[1]).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("tagger").tag("type", data_name).field("channel", d[2]).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("tagger").tag("type", data_name).field("time_offset", float(d[3])).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("tagger").tag("type", data_name).field("id_timestamp", d[4]).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("tagger").tag("type", data_name).field("voltage", voltage).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("tagger").tag("type", data_name).field("trigger_rate", trigger_rate).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("tagger").tag("type", data_name).field("event_rate", event_rate).time(data_ingestion, WritePrecision.NS))
+        points.append(Point("tagger").tag("type", data_name).field(f"spectr_peak", str(spectr)).time(data_ingestion, WritePrecision.NS))
+        points += [Point("tagger").tag("type", data_name).field(f"wn_{i}", wavenumbers[i-1]).time(data_ingestion, WritePrecision.NS) for i in range(1, 5)]
+    try:
+        write_api.write(bucket=INFLUXDB_BUCKET, record=points)
+    except Exception as e:
+        print(f"Error writing to InfluxDB: {e}")
 
 def process_input_args():
     parser = argparse.ArgumentParser()
@@ -101,24 +109,43 @@ def create_saving_path(folder_location, saving_format, label="scan_"):
     name = label + identifier + "." + saving_format
     return os.path.join(folder_location, name)
 
-def main_loop(tagger, data_name, voltage_reader, wavenumber_reader):
+def main_loop(tagger, data_name, voltage_reader, wavenumber_reader, spectrometer_reader):
     tagger.set_trigger_falling()
     tagger.set_trigger_level(float(TRIGGER_LEVEL))
     tagger.start_reading()
-    i = 0
-    batched_data = []
+    event_rate = 0.
+    alpha = 0.2
+    i_time = time.time()
     while True:
-        timestamp = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%S.%fZ')
-        data = tagger.get_data()
-        if data is not None:
-            batched_data += data
-            voltage = voltage_reader.get_voltage()
-            wavenumbers = wavenumber_reader.get_wavenumbers()
-            i += 1
-            if i % POSTING_BATCH_SIZE == 0:
-                write_to_influxdb(batched_data, data_name, voltage, wavenumbers, timestamp)
-                del batched_data
-                batched_data = []
+        data, new_triggers, new_events = tagger.get_data(return_splitted=True)
+        time_now = time.time() 
+        len_triggers = len(new_triggers)
+        # total_triggers += len(new_triggers)
+        if len_triggers > 0:
+            try:
+                voltage = voltage_reader.get_voltage()
+            except Exception as e:
+                print(f"Error reading voltage: {e}")
+                voltage = 0.0
+            try:
+                wavenumbers = wavenumber_reader.get_wavenumbers()
+            except Exception as e:
+                print(f"Error reading wavenumbers: {e}")
+                wavenumbers = [0.0, 0.0, 0.0, 0.0]
+            try:
+                spectr = (spectrometer_reader.get_spec())
+            except Exception as e:
+                print(f"Error reading spectrometer: {e}")
+                spectr = "0.0"
+            delta_t_total = time_now - i_time
+            try:
+                trigger_rate = new_triggers[-1][0] / (delta_t_total)
+            except ZeroDivisionError:
+                trigger_rate = 0.000
+            write_to_influxdb(new_events, data_name, voltage, wavenumbers, spectr, trigger_rate = trigger_rate, event_rate=event_rate)
+            # total_triggers += len_triggers
+            event_rate = ((1 - alpha) * ((len(new_events) * trigger_rate) / len_triggers) + alpha * event_rate) 
+        time.sleep(0.1)
 
 if __name__ == "__main__":
     refresh_rate, is_scanning, voltage_port = process_input_args()
@@ -129,13 +156,19 @@ if __name__ == "__main__":
     initialization_params["save_path"] = save_path
     tagger = Tagger(initialization_params=initialization_params)
     data_name = save_path.split("monitor_")[1].split(".")[0]
-    multimeter = HP_Multimeter("COM" + str(voltage_port))
+    try:
+        multimeter = HP_Multimeter("COM" + str(voltage_port))
+    except:
+        multimeter = None
     voltage_reader = VoltageReader(multimeter, refresh_rate=refresh_rate)
     wavenumber_reader = WavenumberReader(refresh_rate=refresh_rate)
+    spectrometer_reader = SpectrometreReader(refresh_rate=refresh_rate)
     voltage_reader.start()
     wavenumber_reader.start()
+    spectrometer_reader.start()
     try:
-        main_loop(tagger, data_name, voltage_reader, wavenumber_reader)
+        main_loop(tagger, data_name, voltage_reader, wavenumber_reader, spectrometer_reader)
     except KeyboardInterrupt:
         voltage_reader.stop()
         wavenumber_reader.stop()
+        spectrometer_reader.stop()
