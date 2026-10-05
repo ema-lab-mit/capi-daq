@@ -6,10 +6,8 @@ import time
 
 def run_commands():
     # Start the server
-    server_process = subprocess.Popen(["influxd"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    
-    # Give the server some time to start up
-    time.sleep(2)
+    #server_process = subprocess.Popen(["influxd"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    server_process = None
     
     # Start the GUI
     activate_env = "conda activate envNTT"
@@ -24,9 +22,9 @@ def run_commands():
 
 def stop_processes(server_process, gui_process):
     # Stop the server process
-    if server_process:
-        server_process.terminate()
-        server_process.wait()
+    # if server_process:
+    #     server_process.terminate()
+    #     server_process.wait()
     
     # Stop the GUI process
     if gui_process:

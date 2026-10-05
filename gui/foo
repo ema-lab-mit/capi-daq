@@ -1,0 +1,43 @@
+No data retrieved from InfluxDB.
+No data retrieved from InfluxDB.
+card initialized
+No data retrieved from InfluxDB.
+Starting data fetching thread with measurement name: 2024_11_21_19_04_10
+No data retrieved from InfluxDB.
+Estimated rates: {-1: 1}
+Estimated rates: {-1: 1}
+Estimated rates: {-1: 1}
+Estimated rates: {-1: 1}
+Estimated rates: {-1: 1}
+Estimated rates: {-1: 1}
+No data retrieved from InfluxDB.
+Error updating plots: cannot access local variable 'trigger_rate' where it is not associated with a value
+Error updating plots: cannot access local variable 'trigger_rate' where it is not associated with a value
+Error updating plots: cannot access local variable 'trigger_rate' where it is not associated with a value
+Error updating plots: cannot access local variable 'trigger_rate' where it is not associated with a value
+Error updating plots: cannot access local variable 'trigger_rate' where it is not associated with a value
+Error updating plots: cannot access local variable 'trigger_rate' where it is not associated with a value
+No data retrieved from InfluxDB.
+Estimated rates: {-1: 1}
+Error updating plots: cannot access local variable 'trigger_rate' where it is not associated with a value
+Updated REFRESH_RATE to: 0.5 seconds
+Estimated rates: {-1: 1}
+Error updating plots: cannot access local variable 'trigger_rate' where it is not associated with a value
+Updated NBATCH to: 1000
+Updated TOTAL_MAX_POINTS to: 50000
+Updated MAX_POINTS_FOR_PLOT to: 100
+Updated integration_window to: 10
+No data retrieved from InfluxDB.
+No data retrieved from InfluxDB.
+Estimated rates: {-1: 1}
+Error updating plots: cannot access local variable 'trigger_rate' where it is not associated with a value
+No data retrieved from InfluxDB.
+No data retrieved from InfluxDB.
+Estimated rates: {-1: 1}
+Error updating plots: cannot access local variable 'trigger_rate' where it is not associated with a value
+No data retrieved from InfluxDB.
+started reading
+Queried InfluxDB: Retrieved 31 records.
+No unseen new data after filtering by time.
+Updated last_timestamp to: 2024-11-21T19:04:14.731515+00:00
+Estimated rates: {-1: 1}
